@@ -36,6 +36,7 @@
       <header class="topbar">
         <button class="icon-btn menu-btn" id="menuBtn" aria-label="Menú">☰</button>
         <h1 id="pageTitle">Panel</h1>
+        <span class="badge" id="syncBadge" aria-live="polite"></span>
         <div class="rate-box" id="rateBox" title="Editar tasas en Configuración"></div>
         <select id="viewCurrency" class="currency-select" aria-label="Moneda de visualización">
           <option value="USD">USD $</option>
@@ -54,6 +55,19 @@
         <button class="icon-btn" id="modalClose" aria-label="Cerrar">✕</button>
       </div>
       <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop confirm-backdrop" id="confirm" hidden>
+    <div class="modal confirm" role="alertdialog" aria-modal="true">
+      <div class="modal-body">
+        <p class="confirm-msg"></p>
+        <input class="confirm-typed" id="confirmTyped" autocomplete="off" hidden>
+        <div class="form-actions">
+          <button type="button" class="btn" data-cancel>Cancelar</button>
+          <button type="button" class="btn primary" data-ok>Aceptar</button>
+        </div>
+      </div>
     </div>
   </div>
 

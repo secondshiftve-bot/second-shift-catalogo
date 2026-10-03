@@ -7,8 +7,15 @@ Sistema administrativo para el negocio de uniformes, inspirado en las funciones 
 rentabilidad en tiempo real y multimoneda con tasa BCV), adaptado a la venta de uniformes
 escolares, médicos y corporativos.
 
-**Cómo usarlo:** abre `finanzas/index.html` en el navegador (doble clic). No necesita
-instalación ni internet. Para probarlo, en el Panel pulsa **Cargar datos de ejemplo**.
+**Versión en la nube (recomendada):** publicada en claude.ai como Artifact con base de datos
+compartida: https://claude.ai/artifact/38Kygx6bYRGQnQpzAtcjqf — los datos se guardan en la nube
+y todas las personas con acceso ven los cambios en vivo. Se comparte desde el menú **Compartir**
+de la página. Tras modificar la app, regenera el archivo con `python3 finanzas/build-nube.py` y
+vuelve a publicar `finanzas/nube.html`.
+
+**Versión local:** abre `finanzas/index.html` en el navegador (doble clic). No necesita
+instalación ni internet; los datos quedan en ese navegador. Para probarla, en el Panel pulsa
+**Cargar datos de ejemplo**.
 
 ### Módulos
 
@@ -33,6 +40,7 @@ saldos pendientes se muestran en Bs a la tasa actual.
 
 ### Importante: respaldo
 
-Los datos se guardan en el navegador del equipo donde se usa (localStorage). Descarga un respaldo
+En la versión local los datos se guardan en el navegador del equipo donde se usa (localStorage);
+para pasarlos a la nube, descarga el respaldo allí y restáuralo en la versión en la nube. Descarga un respaldo
 con frecuencia desde **Configuración → Descargar respaldo** y guárdalo en Drive o en tu correo;
 con ese archivo puedes restaurar o mover la información a otro equipo.

@@ -1,0 +1,1853 @@
+/* Second Shift · Sistema de finanzas para negocio de uniformes
+ * App de una sola página, sin dependencias. Los datos se guardan en el
+ * navegador (localStorage); usa Configuración → Respaldo para exportarlos.
+ * Todos los montos se guardan en USD (moneda base) y se muestran en
+ * USD, Bs o EUR usando las tasas BCV configuradas.
+ */
+(function () {
+  'use strict';
+
+  const STORAGE_KEY = 'ss-finanzas-v1';
+  const RATE_API = {
+    usd: 'https://ve.dolarapi.com/v1/dolares/oficial',
+    eur: 'https://ve.dolarapi.com/v1/euros/oficial',
+  };
+
+  const ESTADOS_PEDIDO = ['Cotizado', 'Confirmado', 'En producción', 'Listo', 'Entregado', 'Cancelado'];
+  const CURRENCY_LABEL = { USD: '$', VES: 'Bs', EUR: '€' };
+
+  // ---------------------------------------------------------------------------
+  // Estado
+  // ---------------------------------------------------------------------------
+
+  function defaultState() {
+    return {
+      version: 1,
+      config: {
+        negocio: 'Second Shift',
+        rif: '',
+        telefono: '',
+        direccion: '',
+        tasaBs: 36.5,
+        tasaEurBs: 39.8,
+        tasaFecha: today(),
+        monedaVista: 'USD',
+        tallas: ['2', '4', '6', '8', '10', '12', '14', '16', 'XS', 'S', 'M', 'L', 'XL', 'XXL'],
+        categoriasProducto: ['Chemise', 'Camisa', 'Pantalón', 'Falda', 'Short', 'Mono / Deportivo', 'Bata / Uniforme médico', 'Braga / Industrial', 'Chaqueta', 'Accesorios'],
+        categoriasGasto: ['Telas e insumos', 'Costura / Maquila', 'Bordado / Estampado', 'Nómina', 'Alquiler', 'Servicios (luz, agua, internet)', 'Transporte / Envíos', 'Publicidad', 'Comisiones bancarias', 'Impuestos', 'Mantenimiento', 'Otros'],
+        seq: { venta: 1, pedido: 1, compra: 1 },
+      },
+      historialTasas: [],
+      cuentas: [
+        { id: uid(), nombre: 'Efectivo $', moneda: 'USD', saldoInicial: 0 },
+        { id: uid(), nombre: 'Efectivo Bs', moneda: 'VES', saldoInicial: 0 },
+        { id: uid(), nombre: 'Banco / Pago Móvil', moneda: 'VES', saldoInicial: 0 },
+        { id: uid(), nombre: 'Zelle', moneda: 'USD', saldoInicial: 0 },
+      ],
+      productos: [],
+      clientes: [],
+      proveedores: [],
+      ventas: [],
+      pedidos: [],
+      gastos: [],
+      pagos: [],
+      movimientos: [],
+      movInv: [],
+    };
+  }
+
+  let S = load();
+
+  function load() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const data = JSON.parse(raw);
+        const base = defaultState();
+        data.config = Object.assign({}, base.config, data.config || {});
+        data.config.seq = Object.assign({}, base.config.seq, data.config.seq || {});
+        for (const k of Object.keys(base)) if (data[k] === undefined) data[k] = base[k];
+        return data;
+      }
+    } catch (e) {
+      console.error('No se pudieron leer los datos guardados', e);
+    }
+    return defaultState();
+  }
+
+  function save() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
+    } catch (e) {
+      toast('⚠️ No se pudo guardar en este navegador. Exporta un respaldo.');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Utilidades
+  // ---------------------------------------------------------------------------
+
+  function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
+  function today() { return new Date().toISOString().slice(0, 10); }
+  function monthKey(d) { return (d || '').slice(0, 7); }
+  function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+  function num(v) { const n = parseFloat(String(v).replace(',', '.')); return isNaN(n) ? 0 : n; }
+  function byId(list, id) { return list.find(x => x.id === id); }
+  function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+  function fmtDate(d) {
+    if (!d) return '';
+    const [y, m, day] = d.split('-');
+    return `${day}/${m}/${y}`;
+  }
+  function addDays(d, n) {
+    const dt = new Date(d + 'T12:00:00');
+    dt.setDate(dt.getDate() + n);
+    return dt.toISOString().slice(0, 10);
+  }
+  function pad(n, w = 4) { return String(n).padStart(w, '0'); }
+
+  // Conversión de monedas. tasaBs = Bs por 1 USD; tasaEurBs = Bs por 1 EUR.
+  function toUSD(monto, moneda, tasaBs = S.config.tasaBs, tasaEurBs = S.config.tasaEurBs) {
+    monto = num(monto);
+    if (moneda === 'VES') return tasaBs ? monto / tasaBs : 0;
+    if (moneda === 'EUR') return tasaBs ? monto * tasaEurBs / tasaBs : 0;
+    return monto;
+  }
+  function fromUSD(usd, moneda, tasaBs = S.config.tasaBs, tasaEurBs = S.config.tasaEurBs) {
+    usd = num(usd);
+    if (moneda === 'VES') return usd * tasaBs;
+    if (moneda === 'EUR') return tasaEurBs ? usd * tasaBs / tasaEurBs : 0;
+    return usd;
+  }
+  function fmtCur(monto, moneda) {
+    const n = Number(monto) || 0;
+    const s = n.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return moneda === 'VES' ? `Bs ${s}` : moneda === 'EUR' ? `€${s}` : `$${s}`;
+  }
+  /** Formatea un monto en USD en la moneda de visualización elegida. */
+  function money(usd) { return fmtCur(fromUSD(usd, S.config.monedaVista), S.config.monedaVista); }
+  function moneyBoth(usd) {
+    return `${fmtCur(usd, 'USD')} <span class="muted small">· ${fmtCur(fromUSD(usd, 'VES'), 'VES')}</span>`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cálculos de negocio
+  // ---------------------------------------------------------------------------
+
+  function pagosDe(kind, id) { return S.pagos.filter(p => p.ref && p.ref.kind === kind && p.ref.id === id); }
+  function pagadoUSD(kind, id) { return round2(pagosDe(kind, id).reduce((a, p) => a + p.montoUSD, 0)); }
+  function saldoVenta(v) { return round2(v.total - pagadoUSD('venta', v.id)); }
+  function saldoPedido(p) { return round2(p.total - pagadoUSD('pedido', p.id)); }
+  function saldoGasto(g) { return round2(g.total - pagadoUSD('gasto', g.id)); }
+
+  function estadoPago(total, saldo, vence) {
+    if (saldo <= 0.009) return '<span class="badge ok">Pagado</span>';
+    if (vence && vence < today()) return '<span class="badge bad">Vencido</span>';
+    if (saldo < total) return '<span class="badge warn">Abonado</span>';
+    return '<span class="badge info">Pendiente</span>';
+  }
+
+  function stockTotal(p) { return (p.variantes || []).reduce((a, v) => a + (Number(v.stock) || 0), 0); }
+  function stockDe(p, talla) { const v = (p.variantes || []).find(x => x.talla === talla); return v ? Number(v.stock) || 0 : 0; }
+  function ajustarStock(productoId, talla, delta, tipo, nota, fecha) {
+    const p = byId(S.productos, productoId);
+    if (!p) return;
+    let v = p.variantes.find(x => x.talla === talla);
+    if (!v) { v = { talla, stock: 0 }; p.variantes.push(v); }
+    v.stock = (Number(v.stock) || 0) + delta;
+    S.movInv.push({ id: uid(), fecha: fecha || today(), productoId, talla, cant: delta, tipo, nota: nota || '' });
+  }
+  function bajoStock(p) {
+    const min = Number(p.minimo) || 0;
+    return min > 0 && (p.variantes || []).some(v => (Number(v.stock) || 0) <= min);
+  }
+
+  function saldoCuenta(c) {
+    let s = num(c.saldoInicial);
+    for (const p of S.pagos) {
+      if (p.cuentaId !== c.id) continue;
+      s += p.tipo === 'cobro' ? p.monto : -p.monto;
+    }
+    for (const m of S.movimientos) {
+      if (m.cuentaId === c.id) s += m.tipo === 'ingreso' ? m.monto : -m.monto;
+      if (m.tipo === 'transferencia' && m.destinoId === c.id) s += m.montoDestino;
+    }
+    return round2(s);
+  }
+
+  function enRango(fecha, desde, hasta) { return (!desde || fecha >= desde) && (!hasta || fecha <= hasta); }
+
+  /** Estado de resultados para un rango de fechas (base devengado). */
+  function resultados(desde, hasta) {
+    const ventas = S.ventas.filter(v => enRango(v.fecha, desde, hasta));
+    const bruto = ventas.reduce((a, v) => a + v.subtotal, 0);
+    const descuentos = ventas.reduce((a, v) => a + (v.descuento || 0), 0);
+    const netas = bruto - descuentos;
+    const costo = ventas.reduce((a, v) => a + v.items.reduce((b, it) => b + (it.costo || 0) * it.cant, 0), 0);
+    const gastos = S.gastos.filter(g => g.tipo === 'gasto' && enRango(g.fecha, desde, hasta));
+    const porCategoria = {};
+    for (const g of gastos) porCategoria[g.categoria] = (porCategoria[g.categoria] || 0) + g.total;
+    const totalGastos = gastos.reduce((a, g) => a + g.total, 0);
+    const utilBruta = netas - costo;
+    const utilNeta = utilBruta - totalGastos;
+    return {
+      ventas, bruto, descuentos, netas, costo, utilBruta, porCategoria, totalGastos, utilNeta,
+      margen: netas ? utilNeta / netas : 0,
+    };
+  }
+
+  function monthRange(ym) {
+    const [y, m] = ym.split('-').map(Number);
+    const last = new Date(y, m, 0).getDate();
+    return [`${ym}-01`, `${ym}-${String(last).padStart(2, '0')}`];
+  }
+  function lastMonths(n) {
+    const out = [];
+    const d = new Date();
+    d.setDate(1);
+    for (let i = n - 1; i >= 0; i--) {
+      const x = new Date(d.getFullYear(), d.getMonth() - i, 1);
+      out.push(`${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}`);
+    }
+    return out;
+  }
+  const MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+  function monthLabel(ym) { const [y, m] = ym.split('-'); return `${MESES[Number(m) - 1]} ${y.slice(2)}`; }
+
+  // ---------------------------------------------------------------------------
+  // UI básica
+  // ---------------------------------------------------------------------------
+
+  const $ = sel => document.querySelector(sel);
+  const view = $('#view');
+
+  function toast(msg) {
+    const t = $('#toast');
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => { t.hidden = true; }, 2600);
+  }
+
+  function openModal(title, html, onMount) {
+    $('#modalTitle').textContent = title;
+    $('#modalBody').innerHTML = html;
+    $('#modal').hidden = false;
+    if (onMount) onMount($('#modalBody'));
+    const first = $('#modalBody').querySelector('input:not([type=hidden]), select, textarea');
+    if (first) first.focus();
+  }
+  function closeModal() { $('#modal').hidden = true; $('#modalBody').innerHTML = ''; }
+  $('#modalClose').addEventListener('click', closeModal);
+  $('#modal').addEventListener('mousedown', e => { if (e.target.id === 'modal') closeModal(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#modal').hidden) closeModal(); });
+
+  function options(list, selected, { valueKey = 'id', labelKey = 'nombre', empty } = {}) {
+    let html = empty !== undefined ? `<option value="">${esc(empty)}</option>` : '';
+    for (const it of list) {
+      const v = typeof it === 'string' ? it : it[valueKey];
+      const l = typeof it === 'string' ? it : it[labelKey];
+      html += `<option value="${esc(v)}" ${v === selected ? 'selected' : ''}>${esc(l)}</option>`;
+    }
+    return html;
+  }
+
+  function formData(form) {
+    const o = {};
+    for (const el of form.elements) if (el.name) o[el.name] = el.type === 'checkbox' ? el.checked : el.value;
+    return o;
+  }
+
+  function table(headers, rows, emptyMsg = 'Sin registros todavía') {
+    const head = headers.map(h => {
+      const [label, cls] = Array.isArray(h) ? h : [h, ''];
+      return `<th class="${cls}">${label}</th>`;
+    }).join('');
+    const body = rows.length ? rows.join('') : `<tr><td colspan="${headers.length}" class="empty">${emptyMsg}</td></tr>`;
+    return `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  }
+
+  function nombreCliente(id) { const c = byId(S.clientes, id); return c ? c.nombre : 'Cliente de contado'; }
+  function nombreProveedor(id) { const p = byId(S.proveedores, id); return p ? p.nombre : '—'; }
+
+  // Selector de cuenta + monto para registrar un pago en el mismo formulario.
+  function pagoFields(prefix, label) {
+    const c0 = S.cuentas[0];
+    return `
+      <div class="form-grid">
+        <div><label>${label} – cuenta</label>
+          <select name="${prefix}Cuenta">${options(S.cuentas, c0 && c0.id, { empty: '— No registrar pago —' })}</select></div>
+        <div><label>Monto (en moneda de la cuenta)</label>
+          <input name="${prefix}Monto" type="number" step="0.01" min="0" placeholder="0.00"></div>
+        <div><label>Referencia / método</label><input name="${prefix}Ref" placeholder="Ej. Pago móvil #1234"></div>
+        <div style="align-self:end"><button type="button" class="btn sm" data-fill-total="${prefix}">Usar total</button>
+          <div class="muted small" data-pago-hint="${prefix}"></div></div>
+      </div>`;
+  }
+  function wirePagoFields(root, prefix, getTotalUSD) {
+    const sel = root.querySelector(`[name=${prefix}Cuenta]`);
+    const inp = root.querySelector(`[name=${prefix}Monto]`);
+    const hint = root.querySelector(`[data-pago-hint=${prefix}]`);
+    const btn = root.querySelector(`[data-fill-total=${prefix}]`);
+    function update() {
+      const c = byId(S.cuentas, sel.value);
+      if (!c) { hint.textContent = ''; return; }
+      const usd = toUSD(inp.value, c.moneda);
+      hint.textContent = c.moneda === 'USD' ? '' : `≈ ${fmtCur(usd, 'USD')}`;
+    }
+    btn.addEventListener('click', () => {
+      const c = byId(S.cuentas, sel.value);
+      if (!c) return;
+      inp.value = round2(fromUSD(getTotalUSD(), c.moneda)).toFixed(2);
+      update();
+    });
+    sel.addEventListener('change', update);
+    inp.addEventListener('input', update);
+  }
+  function registrarPago({ tipo, kind, id, cuentaId, monto, fecha, nota }) {
+    const c = byId(S.cuentas, cuentaId);
+    monto = round2(monto);
+    if (!c || monto <= 0) return null;
+    const p = {
+      id: uid(), fecha: fecha || today(), tipo, ref: { kind, id }, cuentaId,
+      moneda: c.moneda, monto, tasaBs: S.config.tasaBs, tasaEurBs: S.config.tasaEurBs,
+      montoUSD: round2(toUSD(monto, c.moneda)), nota: nota || '',
+    };
+    S.pagos.push(p);
+    return p;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Editor de renglones (ventas, pedidos, compras)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * mode: 'venta' | 'pedido' | 'compra'
+   * Devuelve un objeto con getLines() y total().
+   */
+  function lineEditor(container, mode, initial, onChange) {
+    let lines = (initial && initial.length ? initial : [blank()]).map(l => Object.assign({}, l));
+    const isPedido = mode === 'pedido';
+    const priceKey = mode === 'compra' ? 'costo' : 'precio';
+
+    function blank() { return { productoId: '', talla: '', descripcion: '', personalizacion: '', cant: 1, precio: 0 }; }
+
+    function render() {
+      const prodOpts = S.productos.map(p => ({ id: p.id, nombre: `${p.nombre}${p.institucion ? ' · ' + p.institucion : ''}` }));
+      const rows = lines.map((l, i) => {
+        const p = byId(S.productos, l.productoId);
+        const tallas = p ? p.variantes.map(v => v.talla) : S.config.tallas;
+        const stockInfo = p && mode === 'venta' && l.talla ? `<div class="muted small">Stock: ${stockDe(p, l.talla)}</div>` : '';
+        return `<tr data-i="${i}">
+          <td style="min-width:200px">
+            <select data-f="productoId">${options(prodOpts, l.productoId, { empty: isPedido ? '— Prenda personalizada —' : '— Selecciona —' })}</select>
+            ${isPedido ? `<input data-f="descripcion" placeholder="Descripción" value="${esc(l.descripcion)}" style="margin-top:4px">` : ''}
+          </td>
+          <td style="min-width:80px"><select data-f="talla">${options(tallas, l.talla, { empty: '—' })}</select>${stockInfo}</td>
+          ${isPedido ? `<td style="min-width:150px"><input data-f="personalizacion" placeholder="Bordado, logo, nombre…" value="${esc(l.personalizacion)}"></td>` : ''}
+          <td><input class="w-qty" data-f="cant" type="number" min="1" step="1" value="${l.cant}"></td>
+          <td><input class="w-price" data-f="precio" type="number" min="0" step="0.01" value="${l.precio}"></td>
+          <td class="num">${fmtCur(l.cant * l.precio, 'USD')}</td>
+          <td><button type="button" class="icon-btn" data-del="${i}" title="Quitar">✕</button></td>
+        </tr>`;
+      }).join('');
+      container.innerHTML = `
+        <div class="table-wrap"><table class="lines">
+          <thead><tr><th>Producto</th><th>Talla</th>${isPedido ? '<th>Personalización</th>' : ''}<th>Cant.</th><th>${mode === 'compra' ? 'Costo $' : 'Precio $'}</th><th class="num">Subtotal</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+        <button type="button" class="btn sm" data-add style="margin-top:8px">+ Agregar renglón</button>`;
+      if (onChange) onChange();
+    }
+
+    container.addEventListener('change', e => {
+      const tr = e.target.closest('tr[data-i]');
+      if (!tr) return;
+      const i = Number(tr.dataset.i);
+      const f = e.target.dataset.f;
+      const l = lines[i];
+      if (f === 'productoId') {
+        l.productoId = e.target.value;
+        const p = byId(S.productos, l.productoId);
+        if (p) {
+          l.precio = Number(p[priceKey]) || 0;
+          l.descripcion = p.nombre;
+          if (!p.variantes.some(v => v.talla === l.talla)) l.talla = p.variantes[0] ? p.variantes[0].talla : '';
+        }
+        render();
+      } else if (f === 'talla') {
+        l.talla = e.target.value;
+        render();
+      }
+      // cant, precio y textos se actualizan en el evento 'input' sin redibujar,
+      // para no perder el foco al pasar de un campo a otro.
+    });
+    container.addEventListener('input', e => {
+      const tr = e.target.closest('tr[data-i]');
+      const f = e.target.dataset.f;
+      if (!tr || !f || f === 'productoId' || f === 'talla') return;
+      const l = lines[Number(tr.dataset.i)];
+      l[f] = f === 'cant' ? Math.max(1, parseInt(e.target.value, 10) || 1) : f === 'precio' ? num(e.target.value) : e.target.value;
+      tr.querySelector('td.num').textContent = fmtCur(l.cant * l.precio, 'USD');
+      if (onChange) onChange();
+    });
+    container.addEventListener('click', e => {
+      if (e.target.matches('[data-add]')) { lines.push(blank()); render(); }
+      const d = e.target.closest('[data-del]');
+      if (d) { lines.splice(Number(d.dataset.del), 1); if (!lines.length) lines.push(blank()); render(); }
+    });
+
+    render();
+    return {
+      getLines: () => lines.filter(l => l.productoId || (isPedido && l.descripcion.trim())),
+      total: () => round2(lines.reduce((a, l) => a + l.cant * l.precio, 0)),
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Vistas
+  // ---------------------------------------------------------------------------
+
+  const routes = {};
+  const titles = {
+    panel: 'Panel', ventas: 'Ventas', pedidos: 'Pedidos y encargos', inventario: 'Inventario',
+    gastos: 'Compras y gastos', cobrar: 'Cuentas por cobrar', pagar: 'Cuentas por pagar',
+    caja: 'Caja y bancos', clientes: 'Clientes', proveedores: 'Proveedores', reportes: 'Reportes',
+    config: 'Configuración',
+  };
+  const ui = { ventasMes: monthKey(today()), gastosMes: monthKey(today()), q: {}, cuentaSel: '', repDesde: monthRange(monthKey(today()))[0], repHasta: today() };
+
+  function current() { return (location.hash || '#panel').slice(1).split('/')[0] || 'panel'; }
+
+  function render() {
+    const r = routes[current()] ? current() : 'panel';
+    $('#pageTitle').textContent = titles[r];
+    document.title = `${titles[r]} · ${S.config.negocio}`;
+    $('#brandName').textContent = S.config.negocio;
+    document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('active', a.dataset.route === r));
+    $('#viewCurrency').value = S.config.monedaVista;
+    $('#rateBox').innerHTML = `BCV $1 = Bs ${S.config.tasaBs.toLocaleString('es-VE')}<br>€1 = Bs ${S.config.tasaEurBs.toLocaleString('es-VE')} · ${fmtDate(S.config.tasaFecha)}`;
+    view.innerHTML = routes[r]();
+    if (routes[r].after) routes[r].after();
+    $('#sidebar').classList.remove('open');
+  }
+
+  window.addEventListener('hashchange', render);
+  $('#menuBtn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
+  $('#viewCurrency').addEventListener('change', e => { S.config.monedaVista = e.target.value; save(); render(); });
+
+  // Delegación de acciones: <button data-action="x" data-id="...">
+  const actions = {};
+  document.addEventListener('click', e => {
+    const el = e.target.closest('[data-action]');
+    if (!el) return;
+    const fn = actions[el.dataset.action];
+    if (fn) { e.preventDefault(); fn(el.dataset.id, el); }
+  });
+  document.addEventListener('input', e => {
+    if (e.target.matches('[data-search]')) {
+      ui.q[e.target.dataset.search] = e.target.value;
+      const pos = e.target.selectionStart;
+      render();
+      const again = document.querySelector(`[data-search="${e.target.dataset.search}"]`);
+      if (again) { again.focus(); again.setSelectionRange(pos, pos); }
+    }
+  });
+  function matches(q, ...fields) {
+    if (!q) return true;
+    q = q.toLowerCase();
+    return fields.some(f => String(f || '').toLowerCase().includes(q));
+  }
+
+  // ----------------------------- Panel ---------------------------------------
+
+  routes.panel = function () {
+    const mes = ui.panelPeriodo === 'mes';
+    const [d1, d2] = mes ? monthRange(monthKey(today())) : [addDays(today(), -29), today()];
+    const per = mes ? 'del mes' : '(30 días)';
+    const r = resultados(d1, d2);
+    const cxc = S.ventas.map(v => ({ v, s: saldoVenta(v) })).filter(x => x.s > 0.009);
+    const cxcTotal = cxc.reduce((a, x) => a + x.s, 0);
+    const cxcVencido = cxc.filter(x => x.v.vence && x.v.vence < today()).reduce((a, x) => a + x.s, 0);
+    const cxp = S.gastos.map(g => ({ g, s: saldoGasto(g) })).filter(x => x.s > 0.009);
+    const cxpTotal = cxp.reduce((a, x) => a + x.s, 0);
+    const caja = S.cuentas.reduce((a, c) => a + toUSD(saldoCuenta(c), c.moneda), 0);
+    const invValor = S.productos.reduce((a, p) => a + stockTotal(p) * (Number(p.costo) || 0), 0);
+    const invVenta = S.productos.reduce((a, p) => a + stockTotal(p) * (Number(p.precio) || 0), 0);
+    const cobrosMes = S.pagos.filter(p => p.tipo === 'cobro' && enRango(p.fecha, d1, d2)).reduce((a, p) => a + p.montoUSD, 0);
+
+    const pedidosAbiertos = S.pedidos
+      .filter(p => !['Entregado', 'Cancelado'].includes(p.estado))
+      .sort((a, b) => (a.entrega || '9999').localeCompare(b.entrega || '9999'))
+      .slice(0, 8);
+    const bajos = S.productos.filter(bajoStock).slice(0, 8);
+
+    // Top productos del mes
+    const top = {};
+    for (const v of r.ventas) for (const it of v.items) {
+      top[it.nombre] = top[it.nombre] || { cant: 0, total: 0 };
+      top[it.nombre].cant += it.cant;
+      top[it.nombre].total += it.cant * it.precio;
+    }
+    const topList = Object.entries(top).sort((a, b) => b[1].total - a[1].total).slice(0, 6);
+    const topMax = topList.length ? topList[0][1].total : 1;
+
+    const empezar = !S.productos.length && !S.ventas.length ? `
+      <div class="card">
+        <h3>👋 Bienvenido</h3>
+        <p>Empieza registrando tus productos en <a href="#inventario">Inventario</a> (con tallas y stock),
+        tus <a href="#clientes">clientes</a> (colegios, empresas, clínicas) y ajusta la <a href="#config">tasa BCV</a>.
+        ¿Quieres ver cómo funciona primero?</p>
+        <button class="btn primary" data-action="cargarDemo">Cargar datos de ejemplo</button>
+      </div>` : '';
+
+    return `${empezar}
+      <div class="toolbar">
+        <select id="panelPeriodo">
+          <option value="30" ${mes ? '' : 'selected'}>Últimos 30 días</option>
+          <option value="mes" ${mes ? 'selected' : ''}>Este mes</option>
+        </select>
+        <span class="muted small">${fmtDate(d1)} – ${fmtDate(d2)}</span>
+      </div>
+      <div class="grid kpis">
+        ${kpi(`Ventas ${per}`, money(r.netas), `${r.ventas.length} ventas · cobrado ${money(cobrosMes)}`)}
+        ${kpi(`Utilidad neta ${per}`, money(r.utilNeta), `Margen ${(r.margen * 100).toFixed(1)}%`, r.utilNeta >= 0 ? 'good' : 'bad')}
+        ${kpi(`Gastos ${per}`, money(r.totalGastos), `Costo de ventas ${money(r.costo)}`)}
+        ${kpi('Disponible en caja', money(caja), `${S.cuentas.length} cuentas`)}
+        ${kpi('Por cobrar', money(cxcTotal), cxcVencido > 0 ? `<span style="color:var(--danger)">Vencido ${money(cxcVencido)}</span>` : 'Nada vencido')}
+        ${kpi('Por pagar', money(cxpTotal), `${cxp.length} documentos`)}
+        ${kpi('Inventario (al costo)', money(invValor), `Valor de venta ${money(invVenta)}`)}
+      </div>
+      <div class="grid two">
+        <div class="card"><h3>Ingresos vs egresos (6 meses)</h3>${chartMeses()}</div>
+        <div class="card"><h3>Más vendidos ${per}</h3>
+          ${topList.length ? topList.map(([n, x]) => `
+            <div class="bar-row"><span title="${esc(n)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(n)}</span>
+            <div class="bar-track"><div class="bar-fill" style="width:${(x.total / topMax * 100).toFixed(1)}%"></div></div>
+            <span class="num">${money(x.total)}</span></div>`).join('') : '<p class="muted">Aún no hay ventas en el período.</p>'}
+        </div>
+        <div class="card"><h3>Pedidos por entregar</h3>
+          ${table(['#', 'Cliente', 'Entrega', 'Estado', ['Saldo', 'num']], pedidosAbiertos.map(p => `
+            <tr><td>${esc(p.numero)}</td><td>${esc(nombreCliente(p.clienteId))}</td>
+            <td>${p.entrega ? fmtDate(p.entrega) + (p.entrega < today() ? ' <span class="badge bad">Atrasado</span>' : '') : '—'}</td>
+            <td>${estadoBadge(p.estado)}</td><td class="num">${money(saldoPedido(p))}</td></tr>`), 'No hay pedidos pendientes 🎉')}
+        </div>
+        <div class="card"><h3>Stock bajo</h3>
+          ${table(['Producto', 'Tallas en mínimo'], bajos.map(p => `
+            <tr><td>${esc(p.nombre)}</td><td>${p.variantes.filter(v => v.stock <= p.minimo).map(v => `<span class="badge ${v.stock <= 0 ? 'bad' : 'warn'}">${esc(v.talla)}: ${v.stock}</span>`).join(' ')}</td></tr>`), 'Todo el inventario está sobre el mínimo')}
+        </div>
+      </div>`;
+  };
+
+  routes.panel.after = () => {
+    $('#panelPeriodo').addEventListener('change', e => { ui.panelPeriodo = e.target.value; render(); });
+  };
+
+  function kpi(label, value, sub, cls = '') {
+    return `<div class="card kpi ${cls}"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub || ''}</div></div>`;
+  }
+
+  function chartMeses() {
+    const meses = lastMonths(6);
+    const data = meses.map(m => {
+      const [a, b] = monthRange(m);
+      const r = resultados(a, b);
+      return { m, ing: r.netas, egr: r.costo + r.totalGastos };
+    });
+    const max = Math.max(1, ...data.flatMap(d => [d.ing, d.egr]));
+    const W = 560, H = 200, pad = 28, bw = (W - pad) / data.length;
+    const bars = data.map((d, i) => {
+      const x = pad + i * bw + bw * 0.15;
+      const w = bw * 0.33;
+      const h1 = (d.ing / max) * (H - 30), h2 = (d.egr / max) * (H - 30);
+      return `<rect x="${x}" y="${H - 20 - h1}" width="${w}" height="${h1}" rx="3" fill="var(--primary)"><title>Ingresos ${money(d.ing)}</title></rect>
+        <rect x="${x + w + 3}" y="${H - 20 - h2}" width="${w}" height="${h2}" rx="3" fill="var(--warning)"><title>Egresos ${money(d.egr)}</title></rect>
+        <text x="${x + w}" y="${H - 5}" text-anchor="middle">${monthLabel(d.m)}</text>`;
+    }).join('');
+    return `<svg class="chart" viewBox="0 0 ${W} ${H}">
+      <line x1="${pad}" y1="${H - 20}" x2="${W}" y2="${H - 20}" stroke="var(--border)"/>${bars}</svg>
+      <div class="legend"><span><i style="background:var(--primary)"></i>Ventas netas</span><span><i style="background:var(--warning)"></i>Costo de ventas + gastos</span></div>`;
+  }
+
+  function estadoBadge(e) {
+    const cls = { Cotizado: '', Confirmado: 'info', 'En producción': 'warn', Listo: 'ok', Entregado: 'ok', Cancelado: 'bad' }[e] || '';
+    return `<span class="badge ${cls}">${esc(e)}</span>`;
+  }
+
+  // ----------------------------- Ventas --------------------------------------
+
+  routes.ventas = function () {
+    const q = ui.q.ventas || '';
+    const list = S.ventas
+      .filter(v => !ui.ventasMes || monthKey(v.fecha) === ui.ventasMes)
+      .filter(v => matches(q, v.numero, nombreCliente(v.clienteId), v.notas, ...v.items.map(i => i.nombre)))
+      .sort((a, b) => b.fecha.localeCompare(a.fecha) || b.numero.localeCompare(a.numero));
+    const total = list.reduce((a, v) => a + v.total, 0);
+    const saldo = list.reduce((a, v) => a + saldoVenta(v), 0);
+    return `
+      <div class="toolbar">
+        <button class="btn primary" data-action="nuevaVenta">+ Nueva venta</button>
+        <input type="month" value="${ui.ventasMes}" data-action-change="ventasMes">
+        <button class="btn sm" data-action="todosMeses" data-id="ventasMes">Todos</button>
+        <input type="search" placeholder="Buscar…" data-search="ventas" value="${esc(q)}">
+        <span class="spacer"></span>
+        <span class="muted">Total: <b>${money(total)}</b> · Por cobrar: <b>${money(saldo)}</b></span>
+        <button class="btn sm" data-action="csvVentas">⬇ CSV</button>
+      </div>
+      <div class="card" style="padding:0">
+        ${table(['#', 'Fecha', 'Cliente', 'Artículos', ['Total', 'num'], ['Saldo', 'num'], 'Estado', ''], list.map(v => {
+          const s = saldoVenta(v);
+          return `<tr>
+            <td>${esc(v.numero)}</td><td>${fmtDate(v.fecha)}</td><td>${esc(nombreCliente(v.clienteId))}</td>
+            <td class="small">${v.items.map(i => `${i.cant}× ${esc(i.nombre)} (${esc(i.talla)})`).join('<br>')}</td>
+            <td class="num">${money(v.total)}</td><td class="num">${money(s)}</td>
+            <td>${estadoPago(v.total, s, v.vence)}</td>
+            <td class="actions">
+              ${s > 0.009 ? `<button class="btn sm" data-action="cobrar" data-id="${v.id}">Cobrar</button>` : ''}
+              <button class="btn sm" data-action="verVenta" data-id="${v.id}">Ver</button>
+              <button class="btn sm danger" data-action="borrarVenta" data-id="${v.id}">✕</button>
+            </td></tr>`;
+        }), 'No hay ventas en este período')}
+      </div>`;
+  };
+  routes.ventas.after = wireMonthInputs;
+
+  function wireMonthInputs() {
+    document.querySelectorAll('[data-action-change]').forEach(el => {
+      el.addEventListener('change', () => { ui[el.dataset.actionChange] = el.value; render(); });
+    });
+  }
+  actions.todosMeses = key => { ui[key] = ''; render(); };
+
+  function clienteSelect(selected) {
+    return `<select name="clienteId">${options(S.clientes, selected, { empty: 'Cliente de contado' })}</select>`;
+  }
+
+  actions.nuevaVenta = function (_, __, prefill) {
+    if (!S.productos.length) { toast('Primero registra productos en Inventario'); location.hash = '#inventario'; return; }
+    let editor;
+    openModal('Nueva venta', `
+      <form id="f">
+        <div class="form-grid">
+          <div><label>Fecha</label><input type="date" name="fecha" value="${today()}" required></div>
+          <div><label>Cliente</label>${clienteSelect(prefill && prefill.clienteId)}</div>
+          <div><label>Vence (si es a crédito)</label><input type="date" name="vence"></div>
+          <div><label>Descuento ($)</label><input type="number" name="descuento" min="0" step="0.01" value="0"></div>
+        </div>
+        <div id="lines"></div>
+        <div class="totals" id="tot"></div>
+        <h3 style="margin:16px 0 8px;font-size:14px">Pago recibido</h3>
+        ${pagoFields('p', 'Pago')}
+        <div class="form-grid"><div class="full"><label>Notas</label><textarea name="notas"></textarea></div></div>
+        <div class="form-actions"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">Guardar venta</button></div>
+      </form>`, root => {
+      const f = root.querySelector('#f');
+      const tot = root.querySelector('#tot');
+      const totalUSD = () => Math.max(0, round2(editor.total() - num(f.descuento.value)));
+      const upd = () => {
+        if (!editor) return;
+        tot.innerHTML = `<div><span>Subtotal</span><span>${fmtCur(editor.total(), 'USD')}</span></div>
+          <div><span>Descuento</span><span>-${fmtCur(num(f.descuento.value), 'USD')}</span></div>
+          <div class="grand"><span>Total</span><span>${fmtCur(totalUSD(), 'USD')}</span></div>
+          <div class="muted"><span>En bolívares</span><span>${fmtCur(fromUSD(totalUSD(), 'VES'), 'VES')}</span></div>`;
+      };
+      editor = lineEditor(root.querySelector('#lines'), 'venta', prefill && prefill.items, upd);
+      upd();
+      f.descuento.addEventListener('input', upd);
+      wirePagoFields(root, 'p', totalUSD);
+      root.querySelector('[data-close]').addEventListener('click', closeModal);
+      f.addEventListener('submit', e => {
+        e.preventDefault();
+        const d = formData(f);
+        const lines = editor.getLines().filter(l => l.talla);
+        if (!lines.length) { toast('Agrega al menos un producto con talla'); return; }
+        const faltan = lines.filter(l => stockDe(byId(S.productos, l.productoId), l.talla) < l.cant);
+        if (faltan.length && !confirm(`No hay stock suficiente de:\n${faltan.map(l => `${byId(S.productos, l.productoId).nombre} talla ${l.talla}`).join('\n')}\n\n¿Registrar la venta igualmente? (el stock quedará negativo)`)) return;
+        const v = crearVenta({
+          fecha: d.fecha, clienteId: d.clienteId, vence: d.vence, descuento: num(d.descuento), notas: d.notas, lines,
+        });
+        registrarPago({ tipo: 'cobro', kind: 'venta', id: v.id, cuentaId: d.pCuenta, monto: num(d.pMonto), fecha: d.fecha, nota: d.pRef });
+        save();
+        closeModal();
+        render();
+        toast(`Venta ${v.numero} registrada`);
+      });
+    });
+  };
+
+  function crearVenta({ fecha, clienteId, vence, descuento, notas, lines, pedidoId }) {
+    const items = lines.map(l => {
+      const p = byId(S.productos, l.productoId);
+      return {
+        productoId: l.productoId || '', nombre: p ? p.nombre : l.descripcion, talla: l.talla || '',
+        personalizacion: l.personalizacion || '', cant: l.cant, precio: round2(l.precio),
+        costo: p ? Number(p.costo) || 0 : 0,
+      };
+    });
+    const subtotal = round2(items.reduce((a, i) => a + i.cant * i.precio, 0));
+    const v = {
+      id: uid(), numero: 'V-' + pad(S.config.seq.venta++), fecha, clienteId: clienteId || '', vence: vence || '',
+      items, subtotal, descuento: round2(descuento || 0), total: Math.max(0, round2(subtotal - (descuento || 0))),
+      notas: notas || '', pedidoId: pedidoId || '', tasaBs: S.config.tasaBs,
+    };
+    for (const it of items) if (it.productoId && it.talla) ajustarStock(it.productoId, it.talla, -it.cant, 'venta', v.numero, fecha);
+    S.ventas.push(v);
+    return v;
+  }
+
+  actions.borrarVenta = function (id) {
+    const v = byId(S.ventas, id);
+    if (!v || !confirm(`¿Eliminar la venta ${v.numero}? Se devolverá el stock y se borrarán sus cobros.`)) return;
+    for (const it of v.items) if (it.productoId && it.talla) ajustarStock(it.productoId, it.talla, it.cant, 'anulación', v.numero);
+    S.pagos = S.pagos.filter(p => !(p.ref.kind === 'venta' && p.ref.id === id));
+    S.ventas = S.ventas.filter(x => x.id !== id);
+    if (v.pedidoId) { const p = byId(S.pedidos, v.pedidoId); if (p) { p.ventaId = ''; p.estado = 'Listo'; } }
+    save(); render(); toast('Venta eliminada');
+  };
+
+  actions.verVenta = function (id) {
+    const v = byId(S.ventas, id);
+    const c = byId(S.clientes, v.clienteId);
+    const pagos = pagosDe('venta', id);
+    const s = saldoVenta(v);
+    openModal(`Venta ${v.numero}`, `
+      <div id="printArea" class="receipt">
+        <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap">
+          <div><h2>${esc(S.config.negocio)}</h2><div class="muted">${esc(S.config.rif)} ${esc(S.config.telefono)}<br>${esc(S.config.direccion)}</div></div>
+          <div style="text-align:right"><b>Nota de entrega ${esc(v.numero)}</b><br>Fecha: ${fmtDate(v.fecha)}${v.vence ? `<br>Vence: ${fmtDate(v.vence)}` : ''}<br><span class="muted small">Tasa BCV: Bs ${v.tasaBs}</span></div>
+        </div>
+        <p><b>Cliente:</b> ${esc(c ? c.nombre : 'Cliente de contado')}${c && c.doc ? ' · ' + esc(c.doc) : ''}${c && c.telefono ? ' · ' + esc(c.telefono) : ''}</p>
+        ${table(['Producto', 'Talla', ['Cant.', 'num'], ['Precio', 'num'], ['Subtotal', 'num']], v.items.map(i => `
+          <tr><td>${esc(i.nombre)}${i.personalizacion ? `<div class="muted small">${esc(i.personalizacion)}</div>` : ''}</td><td>${esc(i.talla)}</td><td class="num">${i.cant}</td>
+          <td class="num">${fmtCur(i.precio, 'USD')}</td><td class="num">${fmtCur(i.cant * i.precio, 'USD')}</td></tr>`))}
+        <div class="totals" style="margin-top:10px">
+          <div><span>Subtotal</span><span>${fmtCur(v.subtotal, 'USD')}</span></div>
+          ${v.descuento ? `<div><span>Descuento</span><span>-${fmtCur(v.descuento, 'USD')}</span></div>` : ''}
+          <div class="grand"><span>Total</span><span>${fmtCur(v.total, 'USD')}</span></div>
+          <div class="muted"><span>Total Bs (tasa de la venta)</span><span>${fmtCur(v.total * v.tasaBs, 'VES')}</span></div>
+          <div><span>Pagado</span><span>${fmtCur(v.total - s, 'USD')}</span></div>
+          <div><b>Saldo</b><b>${fmtCur(s, 'USD')}</b></div>
+          ${s > 0.009 ? `<div class="muted"><span>Saldo en Bs a tasa de hoy</span><span>${fmtCur(fromUSD(s, 'VES'), 'VES')}</span></div>` : ''}
+        </div>
+        ${v.notas ? `<p class="muted">${esc(v.notas)}</p>` : ''}
+      </div>
+      <h3 style="font-size:14px">Pagos</h3>
+      ${tablaPagos(pagos)}
+      <div class="form-actions no-print">
+        ${s > 0.009 ? `<button class="btn" data-action="cobrar" data-id="${v.id}">Registrar cobro</button>` : ''}
+        ${c && c.telefono ? `<a class="btn" target="_blank" rel="noopener" href="${waLink(c.telefono, `Hola ${c.nombre}, le saluda ${S.config.negocio}. ${s > 0.009 ? `Le recordamos que la nota ${v.numero} tiene un saldo pendiente de ${fmtCur(s, 'USD')} (${fmtCur(fromUSD(s, 'VES'), 'VES')} a tasa BCV de hoy).` : `Gracias por su compra (nota ${v.numero}, total ${fmtCur(v.total, 'USD')}).`}`)}">WhatsApp</a>` : ''}
+        <button class="btn primary" onclick="window.print()">Imprimir</button>
+      </div>`);
+  };
+
+  function waLink(tel, text) {
+    let n = String(tel).replace(/\D/g, '');
+    if (n.startsWith('0')) n = '58' + n.slice(1);
+    return `https://wa.me/${n}?text=${encodeURIComponent(text)}`;
+  }
+
+  function tablaPagos(pagos) {
+    return table(['Fecha', 'Cuenta', ['Monto', 'num'], ['Equiv. $', 'num'], 'Ref.', ''], pagos.map(p => {
+      const c = byId(S.cuentas, p.cuentaId);
+      return `<tr><td>${fmtDate(p.fecha)}</td><td>${esc(c ? c.nombre : '—')}</td><td class="num">${fmtCur(p.monto, p.moneda)}</td>
+        <td class="num">${fmtCur(p.montoUSD, 'USD')}</td><td>${esc(p.nota)}</td>
+        <td class="actions"><button class="btn sm danger no-print" data-action="borrarPago" data-id="${p.id}">✕</button></td></tr>`;
+    }), 'Sin pagos registrados');
+  }
+
+  actions.borrarPago = function (id) {
+    if (!confirm('¿Eliminar este pago?')) return;
+    S.pagos = S.pagos.filter(p => p.id !== id);
+    save(); closeModal(); render(); toast('Pago eliminado');
+  };
+
+  /** Formulario genérico de pago (cobro de venta/pedido o pago de gasto). */
+  function formPago({ titulo, tipo, kind, id, saldoUSD }) {
+    openModal(titulo, `
+      <form id="f">
+        <p>Saldo pendiente: <b>${moneyBoth(saldoUSD)}</b></p>
+        <div class="form-grid"><div><label>Fecha</label><input type="date" name="fecha" value="${today()}"></div></div>
+        ${pagoFields('p', tipo === 'cobro' ? 'Cobro' : 'Pago')}
+        <div class="form-actions"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">Registrar</button></div>
+      </form>`, root => {
+      const f = root.querySelector('#f');
+      wirePagoFields(root, 'p', () => saldoUSD);
+      root.querySelector('[data-fill-total]').click();
+      root.querySelector('[data-close]').addEventListener('click', closeModal);
+      f.addEventListener('submit', e => {
+        e.preventDefault();
+        const d = formData(f);
+        if (!d.pCuenta || num(d.pMonto) <= 0) { toast('Indica la cuenta y el monto'); return; }
+        registrarPago({ tipo, kind, id, cuentaId: d.pCuenta, monto: num(d.pMonto), fecha: d.fecha, nota: d.pRef });
+        save(); closeModal(); render(); toast('Pago registrado');
+      });
+    });
+  }
+
+  actions.cobrar = id => {
+    const v = byId(S.ventas, id);
+    formPago({ titulo: `Cobrar ${v.numero} · ${nombreCliente(v.clienteId)}`, tipo: 'cobro', kind: 'venta', id, saldoUSD: saldoVenta(v) });
+  };
+
+  actions.csvVentas = () => {
+    const rows = [['Numero', 'Fecha', 'Cliente', 'Producto', 'Talla', 'Personalizacion', 'Cantidad', 'Precio USD', 'Subtotal USD', 'Costo USD', 'Total venta USD', 'Saldo USD']];
+    for (const v of S.ventas) for (const i of v.items) {
+      rows.push([v.numero, v.fecha, nombreCliente(v.clienteId), i.nombre, i.talla, i.personalizacion, i.cant, i.precio, round2(i.cant * i.precio), i.costo, v.total, saldoVenta(v)]);
+    }
+    downloadCSV('ventas.csv', rows);
+  };
+
+  // ----------------------------- Pedidos -------------------------------------
+
+  routes.pedidos = function () {
+    const q = ui.q.pedidos || '';
+    const filtro = ui.pedidoEstado || 'abiertos';
+    const list = S.pedidos
+      .filter(p => filtro === 'todos' ? true : filtro === 'abiertos' ? !['Entregado', 'Cancelado'].includes(p.estado) : p.estado === filtro)
+      .filter(p => matches(q, p.numero, nombreCliente(p.clienteId), p.notas, ...p.items.map(i => i.descripcion)))
+      .sort((a, b) => (a.entrega || '9999').localeCompare(b.entrega || '9999'));
+    return `
+      <div class="toolbar">
+        <button class="btn primary" data-action="nuevoPedido">+ Nuevo pedido</button>
+        <select id="estadoFiltro">
+          <option value="abiertos" ${filtro === 'abiertos' ? 'selected' : ''}>Abiertos</option>
+          <option value="todos" ${filtro === 'todos' ? 'selected' : ''}>Todos</option>
+          ${ESTADOS_PEDIDO.map(e => `<option ${filtro === e ? 'selected' : ''}>${e}</option>`).join('')}
+        </select>
+        <input type="search" placeholder="Buscar…" data-search="pedidos" value="${esc(q)}">
+        <span class="spacer"></span>
+        <span class="muted small">Pedidos para colegios, empresas o encargos con bordado. Al entregarlos se convierten en venta.</span>
+      </div>
+      <div class="card" style="padding:0">
+        ${table(['#', 'Cliente', 'Prendas', 'Entrega', 'Estado', ['Total', 'num'], ['Abonado', 'num'], ['Saldo', 'num'], ''], list.map(p => {
+          const s = saldoPedido(p);
+          return `<tr>
+            <td>${esc(p.numero)}<div class="muted small">${fmtDate(p.fecha)}</div></td>
+            <td>${esc(nombreCliente(p.clienteId))}</td>
+            <td class="small">${p.items.map(i => `${i.cant}× ${esc(i.descripcion)} ${i.talla ? '(' + esc(i.talla) + ')' : ''}${i.personalizacion ? ` <span class="muted">· ${esc(i.personalizacion)}</span>` : ''}`).join('<br>')}</td>
+            <td>${p.entrega ? fmtDate(p.entrega) : '—'}${p.entrega && p.entrega < today() && !['Entregado', 'Cancelado'].includes(p.estado) ? '<br><span class="badge bad">Atrasado</span>' : ''}</td>
+            <td><select data-estado="${p.id}" ${p.estado === 'Entregado' ? 'disabled' : ''}>${options(ESTADOS_PEDIDO.filter(e => e !== 'Entregado' || p.estado === 'Entregado'), p.estado)}</select></td>
+            <td class="num">${money(p.total)}</td>
+            <td class="num">${money(p.ventaId ? 0 : p.total - s)}</td>
+            <td class="num">${p.ventaId ? '<span class="muted small">en venta</span>' : money(s)}</td>
+            <td class="actions">
+              ${!p.ventaId && p.estado !== 'Cancelado' ? `<button class="btn sm" data-action="abonoPedido" data-id="${p.id}">Abono</button>
+              <button class="btn sm" data-action="entregarPedido" data-id="${p.id}">Entregar</button>
+              <button class="btn sm" data-action="editarPedido" data-id="${p.id}">Editar</button>` : ''}
+              ${p.ventaId ? `<button class="btn sm" data-action="verVenta" data-id="${p.ventaId}">Ver venta</button>` : ''}
+              ${!p.ventaId ? `<button class="btn sm danger" data-action="borrarPedido" data-id="${p.id}">✕</button>` : ''}
+            </td></tr>`;
+        }), 'No hay pedidos')}
+      </div>`;
+  };
+  routes.pedidos.after = function () {
+    $('#estadoFiltro').addEventListener('change', e => { ui.pedidoEstado = e.target.value; render(); });
+    document.querySelectorAll('[data-estado]').forEach(sel => sel.addEventListener('change', () => {
+      const p = byId(S.pedidos, sel.dataset.estado);
+      p.estado = sel.value; save(); render(); toast(`Pedido ${p.numero}: ${p.estado}`);
+    }));
+  };
+
+  actions.nuevoPedido = id => formPedido(id ? byId(S.pedidos, id) : null);
+  actions.editarPedido = id => formPedido(byId(S.pedidos, id));
+
+  function formPedido(ped) {
+    let editor;
+    openModal(ped ? `Editar pedido ${ped.numero}` : 'Nuevo pedido', `
+      <form id="f">
+        <div class="form-grid">
+          <div><label>Fecha</label><input type="date" name="fecha" value="${ped ? ped.fecha : today()}" required></div>
+          <div><label>Cliente</label>${clienteSelect(ped && ped.clienteId)}</div>
+          <div><label>Fecha de entrega</label><input type="date" name="entrega" value="${ped ? ped.entrega : addDays(today(), 15)}"></div>
+          <div><label>Estado</label><select name="estado">${options(ESTADOS_PEDIDO.filter(e => e !== 'Entregado'), ped ? ped.estado : 'Confirmado')}</select></div>
+        </div>
+        <div id="lines"></div>
+        <div class="totals" id="tot"></div>
+        ${ped ? '' : `<h3 style="margin:16px 0 8px;font-size:14px">Abono inicial</h3>${pagoFields('p', 'Abono')}`}
+        <div class="form-grid"><div class="full"><label>Notas (logo, colores, detalles de producción)</label><textarea name="notas">${esc(ped ? ped.notas : '')}</textarea></div></div>
+        <div class="form-actions"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">Guardar pedido</button></div>
+      </form>`, root => {
+      const f = root.querySelector('#f');
+      const tot = root.querySelector('#tot');
+      const upd = () => {
+        if (!editor) return;
+        tot.innerHTML = `<div class="grand"><span>Total</span><span>${fmtCur(editor.total(), 'USD')}</span></div>
+          <div class="muted"><span>Sugerido 50% abono</span><span>${fmtCur(editor.total() / 2, 'USD')}</span></div>`;
+      };
+      editor = lineEditor(root.querySelector('#lines'), 'pedido', ped && ped.items, upd);
+      upd();
+      if (!ped) wirePagoFields(root, 'p', () => round2(editor.total() / 2));
+      root.querySelector('[data-close]').addEventListener('click', closeModal);
+      f.addEventListener('submit', e => {
+        e.preventDefault();
+        const d = formData(f);
+        const items = editor.getLines().map(l => ({
+          productoId: l.productoId, descripcion: l.descripcion || (byId(S.productos, l.productoId) || {}).nombre || '',
+          talla: l.talla, personalizacion: l.personalizacion, cant: l.cant, precio: round2(l.precio),
+        }));
+        if (!items.length) { toast('Agrega al menos una prenda'); return; }
+        const total = round2(items.reduce((a, i) => a + i.cant * i.precio, 0));
+        if (ped) {
+          Object.assign(ped, { fecha: d.fecha, clienteId: d.clienteId, entrega: d.entrega, estado: d.estado, notas: d.notas, items, total });
+        } else {
+          const p = { id: uid(), numero: 'P-' + pad(S.config.seq.pedido++), fecha: d.fecha, clienteId: d.clienteId, entrega: d.entrega, estado: d.estado, notas: d.notas, items, total, ventaId: '' };
+          S.pedidos.push(p);
+          registrarPago({ tipo: 'cobro', kind: 'pedido', id: p.id, cuentaId: d.pCuenta, monto: num(d.pMonto), fecha: d.fecha, nota: d.pRef });
+        }
+        save(); closeModal(); render(); toast('Pedido guardado');
+      });
+    });
+  }
+
+  actions.abonoPedido = id => {
+    const p = byId(S.pedidos, id);
+    formPago({ titulo: `Abono a pedido ${p.numero}`, tipo: 'cobro', kind: 'pedido', id, saldoUSD: saldoPedido(p) });
+  };
+
+  actions.entregarPedido = id => {
+    const p = byId(S.pedidos, id);
+    const conStock = p.items.filter(i => i.productoId && i.talla);
+    const msg = `¿Marcar el pedido ${p.numero} como entregado y generar la venta?\n\n` +
+      (conStock.length ? 'Se descontará del inventario lo que esté vinculado a productos.\n' : '') +
+      'Los abonos pasarán a la venta.';
+    if (!confirm(msg)) return;
+    const v = crearVenta({
+      fecha: today(), clienteId: p.clienteId, vence: '', descuento: 0, notas: `Pedido ${p.numero}. ${p.notas || ''}`.trim(),
+      lines: p.items, pedidoId: p.id,
+    });
+    for (const pg of pagosDe('pedido', p.id)) pg.ref = { kind: 'venta', id: v.id };
+    p.estado = 'Entregado';
+    p.ventaId = v.id;
+    save(); render(); toast(`Pedido entregado → venta ${v.numero}`);
+  };
+
+  actions.borrarPedido = id => {
+    const p = byId(S.pedidos, id);
+    const abonos = pagosDe('pedido', id).length;
+    if (!confirm(`¿Eliminar el pedido ${p.numero}?${abonos ? `\nTambién se eliminarán ${abonos} abono(s).` : ''}`)) return;
+    S.pagos = S.pagos.filter(x => !(x.ref.kind === 'pedido' && x.ref.id === id));
+    S.pedidos = S.pedidos.filter(x => x.id !== id);
+    save(); render(); toast('Pedido eliminado');
+  };
+
+  // ----------------------------- Inventario ----------------------------------
+
+  routes.inventario = function () {
+    const q = ui.q.inv || '';
+    const cat = ui.invCat || '';
+    const list = S.productos
+      .filter(p => !cat || p.categoria === cat)
+      .filter(p => matches(q, p.nombre, p.sku, p.institucion, p.categoria, p.color))
+      .sort((a, b) => a.nombre.localeCompare(b.nombre));
+    const totalUnid = list.reduce((a, p) => a + stockTotal(p), 0);
+    const valor = list.reduce((a, p) => a + stockTotal(p) * (Number(p.costo) || 0), 0);
+    return `
+      <div class="toolbar">
+        <button class="btn primary" data-action="nuevoProducto">+ Nuevo producto</button>
+        <button class="btn" data-action="ajusteInv">± Ajuste / entrada</button>
+        <select id="catFiltro">${options(S.config.categoriasProducto, cat, { empty: 'Todas las categorías' })}</select>
+        <input type="search" placeholder="Buscar producto, colegio, SKU…" data-search="inv" value="${esc(q)}">
+        <span class="spacer"></span>
+        <span class="muted">${totalUnid} unidades · ${money(valor)} al costo</span>
+        <button class="btn sm" data-action="verMovInv">Movimientos</button>
+        <button class="btn sm" data-action="csvInventario">⬇ CSV</button>
+      </div>
+      <div class="card" style="padding:0">
+        ${table(['Producto', 'Institución', 'Stock por talla', ['Total', 'num'], ['Costo', 'num'], ['Precio', 'num'], ['Margen', 'num'], ''], list.map(p => {
+          const margen = p.precio ? (p.precio - p.costo) / p.precio : 0;
+          return `<tr>
+            <td><b>${esc(p.nombre)}</b><div class="muted small">${esc(p.categoria || '')}${p.sku ? ' · ' + esc(p.sku) : ''}${p.color ? ' · ' + esc(p.color) : ''}</div></td>
+            <td>${esc(p.institucion || '—')}</td>
+            <td>${p.variantes.map(v => `<span class="badge ${v.stock <= 0 ? 'bad' : v.stock <= (p.minimo || 0) ? 'warn' : ''}" title="Talla ${esc(v.talla)}">${esc(v.talla)}: ${v.stock}</span>`).join(' ')}</td>
+            <td class="num">${stockTotal(p)}</td>
+            <td class="num">${money(p.costo)}</td><td class="num">${money(p.precio)}</td>
+            <td class="num">${(margen * 100).toFixed(0)}%</td>
+            <td class="actions"><button class="btn sm" data-action="editarProducto" data-id="${p.id}">Editar</button>
+              <button class="btn sm danger" data-action="borrarProducto" data-id="${p.id}">✕</button></td></tr>`;
+        }), 'No hay productos. Crea el primero (ej. "Chemise azul primaria").')}
+      </div>`;
+  };
+  routes.inventario.after = () => {
+    $('#catFiltro').addEventListener('change', e => { ui.invCat = e.target.value; render(); });
+  };
+
+  actions.nuevoProducto = () => formProducto(null);
+  actions.editarProducto = id => formProducto(byId(S.productos, id));
+
+  function formProducto(p) {
+    const tallasActuales = p ? p.variantes.map(v => v.talla) : [];
+    const todas = [...new Set([...S.config.tallas, ...tallasActuales])];
+    openModal(p ? 'Editar producto' : 'Nuevo producto', `
+      <form id="f">
+        <div class="form-grid">
+          <div class="full"><label>Nombre</label><input name="nombre" required value="${esc(p ? p.nombre : '')}" placeholder="Ej. Chemise blanca bordada"></div>
+          <div><label>Categoría</label><select name="categoria">${options(S.config.categoriasProducto, p ? p.categoria : '')}</select></div>
+          <div><label>Institución / cliente (colegio, empresa)</label><input name="institucion" value="${esc(p ? p.institucion : '')}" list="instList"></div>
+          <div><label>Color / tela</label><input name="color" value="${esc(p ? p.color : '')}"></div>
+          <div><label>SKU / código</label><input name="sku" value="${esc(p ? p.sku : '')}"></div>
+          <div><label>Costo unitario ($)</label><input name="costo" type="number" step="0.01" min="0" value="${p ? p.costo : ''}" required></div>
+          <div><label>Precio de venta ($)</label><input name="precio" type="number" step="0.01" min="0" value="${p ? p.precio : ''}" required></div>
+          <div><label>Stock mínimo por talla</label><input name="minimo" type="number" step="1" min="0" value="${p ? p.minimo : 3}"></div>
+          <div><label>Margen</label><div id="margen" class="muted" style="padding:8px 0">—</div></div>
+        </div>
+        <datalist id="instList">${[...new Set(S.productos.map(x => x.institucion).filter(Boolean))].map(i => `<option value="${esc(i)}">`).join('')}</datalist>
+        <label>Tallas y stock ${p ? '(el stock se ajusta mejor desde "Ajuste / entrada" para dejar registro)' : 'inicial'}</label>
+        <div class="size-grid">
+          ${todas.map(t => {
+            const v = p && p.variantes.find(x => x.talla === t);
+            return `<div><label><input type="checkbox" data-talla="${esc(t)}" ${v ? 'checked' : ''} style="width:auto"> ${esc(t)}</label>
+              <input type="number" step="1" data-stock="${esc(t)}" value="${v ? v.stock : 0}"></div>`;
+          }).join('')}
+        </div>
+        <div style="margin-top:8px"><input id="tallaExtra" placeholder="Otra talla (ej. 18, 3XL) y Enter" style="max-width:240px"></div>
+        <div class="form-actions"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">Guardar</button></div>
+      </form>`, root => {
+      const f = root.querySelector('#f');
+      const m = () => {
+        const c = num(f.costo.value), pr = num(f.precio.value);
+        root.querySelector('#margen').textContent = pr ? `${(((pr - c) / pr) * 100).toFixed(1)}% · ganancia ${fmtCur(pr - c, 'USD')} por unidad` : '—';
+      };
+      f.costo.addEventListener('input', m); f.precio.addEventListener('input', m); m();
+      root.querySelectorAll('[data-stock]').forEach(inp => inp.addEventListener('input', () => {
+        if (num(inp.value) !== 0) root.querySelector(`[data-talla="${CSS.escape(inp.dataset.stock)}"]`).checked = true;
+      }));
+      root.querySelector('#tallaExtra').addEventListener('keydown', e => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        const t = e.target.value.trim();
+        if (!t || root.querySelector(`[data-talla="${CSS.escape(t)}"]`)) return;
+        const div = document.createElement('div');
+        div.innerHTML = `<label><input type="checkbox" data-talla="${esc(t)}" checked style="width:auto"> ${esc(t)}</label><input type="number" step="1" data-stock="${esc(t)}" value="0">`;
+        root.querySelector('.size-grid').appendChild(div);
+        e.target.value = '';
+      });
+      root.querySelector('[data-close]').addEventListener('click', closeModal);
+      f.addEventListener('submit', e => {
+        e.preventDefault();
+        const d = formData(f);
+        const variantes = [...root.querySelectorAll('[data-talla]')].filter(c => c.checked).map(c => ({
+          talla: c.dataset.talla, stock: parseInt(root.querySelector(`[data-stock="${CSS.escape(c.dataset.talla)}"]`).value, 10) || 0,
+        }));
+        if (!variantes.length) { toast('Marca al menos una talla'); return; }
+        const datos = { nombre: d.nombre.trim(), categoria: d.categoria, institucion: d.institucion.trim(), color: d.color.trim(), sku: d.sku.trim(), costo: num(d.costo), precio: num(d.precio), minimo: parseInt(d.minimo, 10) || 0 };
+        if (p) {
+          for (const v of variantes) {
+            const antes = stockDe(p, v.talla);
+            if (v.stock !== antes) S.movInv.push({ id: uid(), fecha: today(), productoId: p.id, talla: v.talla, cant: v.stock - antes, tipo: 'ajuste', nota: 'Edición de producto' });
+          }
+          Object.assign(p, datos, { variantes });
+        } else {
+          const np = Object.assign({ id: uid(), variantes }, datos);
+          S.productos.push(np);
+          for (const v of variantes) if (v.stock) S.movInv.push({ id: uid(), fecha: today(), productoId: np.id, talla: v.talla, cant: v.stock, tipo: 'inicial', nota: 'Stock inicial' });
+        }
+        save(); closeModal(); render(); toast('Producto guardado');
+      });
+    });
+  }
+
+  actions.borrarProducto = id => {
+    const p = byId(S.productos, id);
+    if (!confirm(`¿Eliminar "${p.nombre}"? Las ventas pasadas se conservan.`)) return;
+    S.productos = S.productos.filter(x => x.id !== id);
+    save(); render();
+  };
+
+  actions.ajusteInv = () => {
+    if (!S.productos.length) { toast('No hay productos'); return; }
+    const p0 = S.productos[0];
+    openModal('Ajuste de inventario', `
+      <form id="f">
+        <p class="muted small">Usa "Entrada" para prendas que salen de producción propia o devoluciones; "Salida" para mermas, regalos o daños.
+        Las compras a proveedores regístralas en <a href="#gastos">Compras</a> para que también afecten tus cuentas por pagar.</p>
+        <div class="form-grid">
+          <div><label>Fecha</label><input type="date" name="fecha" value="${today()}"></div>
+          <div><label>Producto</label><select name="productoId">${options(S.productos, p0.id)}</select></div>
+          <div><label>Talla</label><select name="talla">${options(p0.variantes.map(v => v.talla), '')}</select></div>
+          <div><label>Tipo</label><select name="tipo"><option value="entrada">Entrada (+)</option><option value="salida">Salida (−)</option><option value="conteo">Conteo físico (=)</option></select></div>
+          <div><label>Cantidad</label><input name="cant" type="number" step="1" min="0" required></div>
+          <div class="full"><label>Motivo</label><input name="nota" placeholder="Ej. Producción taller, merma, devolución"></div>
+        </div>
+        <div class="form-actions"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">Aplicar</button></div>
+      </form>`, root => {
+      const f = root.querySelector('#f');
+      f.productoId.addEventListener('change', () => {
+        const p = byId(S.productos, f.productoId.value);
+        f.talla.innerHTML = options(p.variantes.map(v => v.talla), '');
+      });
+      root.querySelector('[data-close]').addEventListener('click', closeModal);
+      f.addEventListener('submit', e => {
+        e.preventDefault();
+        const d = formData(f);
+        const p = byId(S.productos, d.productoId);
+        const cant = parseInt(d.cant, 10) || 0;
+        const delta = d.tipo === 'entrada' ? cant : d.tipo === 'salida' ? -cant : cant - stockDe(p, d.talla);
+        if (!delta) { toast('Sin cambios'); return; }
+        ajustarStock(p.id, d.talla, delta, d.tipo, d.nota, d.fecha);
+        save(); closeModal(); render(); toast('Inventario actualizado');
+      });
+    });
+  };
+
+  actions.verMovInv = () => {
+    const list = [...S.movInv].sort((a, b) => b.fecha.localeCompare(a.fecha)).slice(0, 300);
+    openModal('Movimientos de inventario', table(['Fecha', 'Producto', 'Talla', ['Cant.', 'num'], 'Tipo', 'Nota'], list.map(m => {
+      const p = byId(S.productos, m.productoId);
+      return `<tr><td>${fmtDate(m.fecha)}</td><td>${esc(p ? p.nombre : '(eliminado)')}</td><td>${esc(m.talla)}</td>
+        <td class="num" style="color:${m.cant < 0 ? 'var(--danger)' : 'var(--success)'}">${m.cant > 0 ? '+' : ''}${m.cant}</td><td>${esc(m.tipo)}</td><td>${esc(m.nota)}</td></tr>`;
+    })));
+  };
+
+  actions.csvInventario = () => {
+    const rows = [['Producto', 'Categoria', 'Institucion', 'Color', 'SKU', 'Talla', 'Stock', 'Costo USD', 'Precio USD', 'Valor costo USD']];
+    for (const p of S.productos) for (const v of p.variantes) rows.push([p.nombre, p.categoria, p.institucion, p.color, p.sku, v.talla, v.stock, p.costo, p.precio, round2(v.stock * p.costo)]);
+    downloadCSV('inventario.csv', rows);
+  };
+
+  // ----------------------------- Compras y gastos ----------------------------
+
+  routes.gastos = function () {
+    const q = ui.q.gastos || '';
+    const list = S.gastos
+      .filter(g => !ui.gastosMes || monthKey(g.fecha) === ui.gastosMes)
+      .filter(g => matches(q, g.descripcion, g.categoria, nombreProveedor(g.proveedorId), g.numero))
+      .sort((a, b) => b.fecha.localeCompare(a.fecha));
+    const total = list.reduce((a, g) => a + g.total, 0);
+    return `
+      <div class="toolbar">
+        <button class="btn primary" data-action="nuevoGasto">+ Gasto</button>
+        <button class="btn primary" data-action="nuevaCompra">+ Compra de mercancía</button>
+        <input type="month" value="${ui.gastosMes}" data-action-change="gastosMes">
+        <button class="btn sm" data-action="todosMeses" data-id="gastosMes">Todos</button>
+        <input type="search" placeholder="Buscar…" data-search="gastos" value="${esc(q)}">
+        <span class="spacer"></span>
+        <span class="muted">Total: <b>${money(total)}</b></span>
+        <button class="btn sm" data-action="csvGastos">⬇ CSV</button>
+      </div>
+      <div class="card" style="padding:0">
+        ${table(['Fecha', 'Tipo', 'Concepto', 'Proveedor', ['Monto', 'num'], ['Saldo', 'num'], 'Estado', ''], list.map(g => {
+          const s = saldoGasto(g);
+          return `<tr><td>${fmtDate(g.fecha)}</td>
+            <td>${g.tipo === 'compra' ? '<span class="badge info">Compra</span>' : '<span class="badge">Gasto</span>'}</td>
+            <td>${esc(g.descripcion)}<div class="muted small">${esc(g.categoria)}${g.moneda && g.moneda !== 'USD' ? ` · ${fmtCur(g.montoOriginal, g.moneda)}` : ''}</div></td>
+            <td>${esc(nombreProveedor(g.proveedorId))}</td>
+            <td class="num">${money(g.total)}</td><td class="num">${money(s)}</td><td>${estadoPago(g.total, s, g.vence)}</td>
+            <td class="actions">${s > 0.009 ? `<button class="btn sm" data-action="pagarGasto" data-id="${g.id}">Pagar</button>` : ''}
+              <button class="btn sm" data-action="verGasto" data-id="${g.id}">Ver</button>
+              <button class="btn sm danger" data-action="borrarGasto" data-id="${g.id}">✕</button></td></tr>`;
+        }), 'No hay gastos en este período')}
+      </div>`;
+  };
+  routes.gastos.after = wireMonthInputs;
+
+  actions.nuevoGasto = () => {
+    openModal('Nuevo gasto', `
+      <form id="f">
+        <div class="form-grid">
+          <div><label>Fecha</label><input type="date" name="fecha" value="${today()}" required></div>
+          <div><label>Categoría</label><select name="categoria">${options(S.config.categoriasGasto, '')}</select></div>
+          <div class="full"><label>Descripción</label><input name="descripcion" required placeholder="Ej. Pago a costurera semana 3"></div>
+          <div><label>Proveedor (opcional)</label><select name="proveedorId">${options(S.proveedores, '', { empty: '—' })}</select></div>
+          <div><label>Moneda</label><select name="moneda"><option value="USD">USD $</option><option value="VES">Bolívares</option><option value="EUR">Euros</option></select></div>
+          <div><label>Monto</label><input name="monto" type="number" step="0.01" min="0" required></div>
+          <div><label>Vence (si queda por pagar)</label><input type="date" name="vence"></div>
+          <div><span class="muted small" id="equiv"></span></div>
+        </div>
+        <h3 style="margin:8px 0;font-size:14px">Pago</h3>
+        ${pagoFields('p', 'Pagado desde')}
+        <div class="form-actions"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">Guardar</button></div>
+      </form>`, root => {
+      const f = root.querySelector('#f');
+      const totalUSD = () => round2(toUSD(f.monto.value, f.moneda.value));
+      const eq = () => { root.querySelector('#equiv').textContent = f.moneda.value !== 'USD' ? `≈ ${fmtCur(totalUSD(), 'USD')} a tasa BCV` : ''; };
+      f.monto.addEventListener('input', eq); f.moneda.addEventListener('change', eq);
+      wirePagoFields(root, 'p', totalUSD);
+      root.querySelector('[data-close]').addEventListener('click', closeModal);
+      f.addEventListener('submit', e => {
+        e.preventDefault();
+        const d = formData(f);
+        const g = {
+          id: uid(), tipo: 'gasto', fecha: d.fecha, categoria: d.categoria, descripcion: d.descripcion.trim(),
+          proveedorId: d.proveedorId, moneda: d.moneda, montoOriginal: num(d.monto), tasaBs: S.config.tasaBs,
+          total: totalUSD(), vence: d.vence, items: [],
+        };
+        S.gastos.push(g);
+        registrarPago({ tipo: 'pago', kind: 'gasto', id: g.id, cuentaId: d.pCuenta, monto: num(d.pMonto), fecha: d.fecha, nota: d.pRef });
+        save(); closeModal(); render(); toast('Gasto registrado');
+      });
+    });
+  };
+
+  actions.nuevaCompra = () => {
+    if (!S.productos.length) { toast('Primero registra productos en Inventario'); return; }
+    let editor;
+    openModal('Compra de mercancía (entra al inventario)', `
+      <form id="f">
+        <div class="form-grid">
+          <div><label>Fecha</label><input type="date" name="fecha" value="${today()}" required></div>
+          <div><label>Proveedor</label><select name="proveedorId">${options(S.proveedores, '', { empty: '—' })}</select></div>
+          <div><label>N° factura proveedor</label><input name="factura"></div>
+          <div><label>Vence (crédito)</label><input type="date" name="vence"></div>
+          <div class="full"><label><input type="checkbox" name="actCosto" checked style="width:auto"> Actualizar el costo de los productos con este precio de compra</label></div>
+        </div>
+        <div id="lines"></div>
+        <div class="totals" id="tot"></div>
+        <h3 style="margin:8px 0;font-size:14px">Pago</h3>
+        ${pagoFields('p', 'Pagado desde')}
+        <div class="form-actions"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">Guardar compra</button></div>
+      </form>`, root => {
+      const f = root.querySelector('#f');
+      const tot = root.querySelector('#tot');
+      editor = lineEditor(root.querySelector('#lines'), 'compra', null, () => {
+        if (editor) tot.innerHTML = `<div class="grand"><span>Total</span><span>${fmtCur(editor.total(), 'USD')}</span></div>`;
+      });
+      tot.innerHTML = `<div class="grand"><span>Total</span><span>${fmtCur(editor.total(), 'USD')}</span></div>`;
+      wirePagoFields(root, 'p', () => editor.total());
+      root.querySelector('[data-close]').addEventListener('click', closeModal);
+      f.addEventListener('submit', e => {
+        e.preventDefault();
+        const d = formData(f);
+        const lines = editor.getLines().filter(l => l.talla);
+        if (!lines.length) { toast('Agrega productos con talla'); return; }
+        const numero = 'C-' + pad(S.config.seq.compra++);
+        const items = lines.map(l => ({ productoId: l.productoId, nombre: byId(S.productos, l.productoId).nombre, talla: l.talla, cant: l.cant, precio: round2(l.precio) }));
+        const g = {
+          id: uid(), numero, tipo: 'compra', fecha: d.fecha, categoria: 'Mercancía', descripcion: `Compra ${numero}${d.factura ? ' · Fact. ' + d.factura : ''}`,
+          proveedorId: d.proveedorId, moneda: 'USD', montoOriginal: editor.total(), total: editor.total(), vence: d.vence, items,
+        };
+        for (const it of items) {
+          ajustarStock(it.productoId, it.talla, it.cant, 'compra', numero, d.fecha);
+          if (d.actCosto) byId(S.productos, it.productoId).costo = it.precio;
+        }
+        S.gastos.push(g);
+        registrarPago({ tipo: 'pago', kind: 'gasto', id: g.id, cuentaId: d.pCuenta, monto: num(d.pMonto), fecha: d.fecha, nota: d.pRef });
+        save(); closeModal(); render(); toast(`Compra ${numero} registrada`);
+      });
+    });
+  };
+
+  actions.pagarGasto = id => {
+    const g = byId(S.gastos, id);
+    formPago({ titulo: `Pagar: ${g.descripcion}`, tipo: 'pago', kind: 'gasto', id, saldoUSD: saldoGasto(g) });
+  };
+
+  actions.verGasto = id => {
+    const g = byId(S.gastos, id);
+    openModal(g.descripcion, `
+      <p>${fmtDate(g.fecha)} · ${esc(g.categoria)} · Proveedor: ${esc(nombreProveedor(g.proveedorId))}</p>
+      ${g.items && g.items.length ? table(['Producto', 'Talla', ['Cant.', 'num'], ['Costo', 'num']], g.items.map(i => `<tr><td>${esc(i.nombre)}</td><td>${esc(i.talla)}</td><td class="num">${i.cant}</td><td class="num">${fmtCur(i.precio, 'USD')}</td></tr>`)) : ''}
+      <p>Total: <b>${moneyBoth(g.total)}</b> · Saldo: <b>${fmtCur(saldoGasto(g), 'USD')}</b></p>
+      <h3 style="font-size:14px">Pagos</h3>${tablaPagos(pagosDe('gasto', id))}`);
+  };
+
+  actions.borrarGasto = id => {
+    const g = byId(S.gastos, id);
+    if (!confirm(`¿Eliminar "${g.descripcion}"?${g.tipo === 'compra' ? '\nSe descontará la mercancía del inventario.' : ''}`)) return;
+    if (g.items) for (const it of g.items) ajustarStock(it.productoId, it.talla, -it.cant, 'anulación', g.numero || '');
+    S.pagos = S.pagos.filter(p => !(p.ref.kind === 'gasto' && p.ref.id === id));
+    S.gastos = S.gastos.filter(x => x.id !== id);
+    save(); render(); toast('Eliminado');
+  };
+
+  actions.csvGastos = () => {
+    const rows = [['Fecha', 'Tipo', 'Categoria', 'Descripcion', 'Proveedor', 'Moneda', 'Monto original', 'Total USD', 'Saldo USD', 'Vence']];
+    for (const g of S.gastos) rows.push([g.fecha, g.tipo, g.categoria, g.descripcion, nombreProveedor(g.proveedorId), g.moneda, g.montoOriginal, g.total, saldoGasto(g), g.vence]);
+    downloadCSV('gastos.csv', rows);
+  };
+
+  // ----------------------------- Cuentas por cobrar / pagar ------------------
+
+  function antiguedad(vence) {
+    if (!vence || vence >= today()) return 'Al día';
+    const dias = Math.round((new Date(today()) - new Date(vence)) / 86400000);
+    return dias <= 30 ? '1-30 días' : dias <= 60 ? '31-60 días' : dias <= 90 ? '61-90 días' : '+90 días';
+  }
+
+  routes.cobrar = function () {
+    const items = S.ventas.map(v => ({ v, s: saldoVenta(v) })).filter(x => x.s > 0.009)
+      .sort((a, b) => (a.v.vence || a.v.fecha).localeCompare(b.v.vence || b.v.fecha));
+    const porCliente = {};
+    for (const x of items) porCliente[x.v.clienteId] = (porCliente[x.v.clienteId] || 0) + x.s;
+    const buckets = { 'Al día': 0, '1-30 días': 0, '31-60 días': 0, '61-90 días': 0, '+90 días': 0 };
+    for (const x of items) buckets[antiguedad(x.v.vence)] += x.s;
+    const total = items.reduce((a, x) => a + x.s, 0);
+    const adelantos = S.pedidos.filter(p => !p.ventaId).reduce((a, p) => a + pagadoUSD('pedido', p.id), 0);
+    return `
+      <div class="grid kpis">
+        ${kpi('Total por cobrar', money(total), `${items.length} notas · tasa hoy ${fmtCur(fromUSD(total, 'VES'), 'VES')}`)}
+        ${Object.entries(buckets).map(([k, val]) => kpi(k, money(val), '', k !== 'Al día' && val > 0 ? 'bad' : '')).join('')}
+        ${kpi('Abonos de pedidos sin entregar', money(adelantos), 'Anticipos recibidos')}
+      </div>
+      <div class="grid two">
+        <div class="card" style="padding:0">
+          ${table(['Nota', 'Cliente', 'Fecha', 'Vence', ['Saldo', 'num'], ''], items.map(({ v, s }) => `
+            <tr><td>${esc(v.numero)}</td><td>${esc(nombreCliente(v.clienteId))}</td><td>${fmtDate(v.fecha)}</td>
+            <td>${v.vence ? fmtDate(v.vence) : '—'} ${estadoPago(v.total, s, v.vence)}</td><td class="num">${money(s)}</td>
+            <td class="actions"><button class="btn sm" data-action="cobrar" data-id="${v.id}">Cobrar</button>
+            <button class="btn sm" data-action="verVenta" data-id="${v.id}">Ver</button></td></tr>`), 'Nadie te debe 🎉')}
+        </div>
+        <div class="card"><h3>Por cliente</h3>
+          ${table(['Cliente', ['Saldo', 'num']], Object.entries(porCliente).sort((a, b) => b[1] - a[1]).map(([cid, val]) =>
+            `<tr><td>${esc(nombreCliente(cid))}</td><td class="num">${money(val)}</td></tr>`), '—')}
+        </div>
+      </div>`;
+  };
+
+  routes.pagar = function () {
+    const items = S.gastos.map(g => ({ g, s: saldoGasto(g) })).filter(x => x.s > 0.009)
+      .sort((a, b) => (a.g.vence || a.g.fecha).localeCompare(b.g.vence || b.g.fecha));
+    const total = items.reduce((a, x) => a + x.s, 0);
+    const vencido = items.filter(x => x.g.vence && x.g.vence < today()).reduce((a, x) => a + x.s, 0);
+    const semana = items.filter(x => x.g.vence && x.g.vence >= today() && x.g.vence <= addDays(today(), 7)).reduce((a, x) => a + x.s, 0);
+    return `
+      <div class="grid kpis">
+        ${kpi('Total por pagar', money(total), `${items.length} documentos`)}
+        ${kpi('Vencido', money(vencido), '', vencido > 0 ? 'bad' : '')}
+        ${kpi('Vence en 7 días', money(semana), '')}
+      </div>
+      <div class="card" style="padding:0">
+        ${table(['Fecha', 'Concepto', 'Proveedor', 'Vence', ['Saldo', 'num'], ''], items.map(({ g, s }) => `
+          <tr><td>${fmtDate(g.fecha)}</td><td>${esc(g.descripcion)}</td><td>${esc(nombreProveedor(g.proveedorId))}</td>
+          <td>${g.vence ? fmtDate(g.vence) : '—'} ${estadoPago(g.total, s, g.vence)}</td><td class="num">${money(s)}</td>
+          <td class="actions"><button class="btn sm" data-action="pagarGasto" data-id="${g.id}">Pagar</button></td></tr>`), 'No tienes deudas pendientes')}
+      </div>`;
+  };
+
+  // ----------------------------- Caja y bancos -------------------------------
+
+  routes.caja = function () {
+    const sel = ui.cuentaSel && byId(S.cuentas, ui.cuentaSel) ? ui.cuentaSel : (S.cuentas[0] || {}).id;
+    const totalUSD = S.cuentas.reduce((a, c) => a + toUSD(saldoCuenta(c), c.moneda), 0);
+    const c = byId(S.cuentas, sel);
+    let ledger = [];
+    if (c) {
+      for (const p of S.pagos.filter(p => p.cuentaId === c.id)) {
+        let concepto = '';
+        if (p.ref.kind === 'venta') { const v = byId(S.ventas, p.ref.id); concepto = v ? `Cobro ${v.numero} · ${nombreCliente(v.clienteId)}` : 'Cobro'; }
+        else if (p.ref.kind === 'pedido') { const pd = byId(S.pedidos, p.ref.id); concepto = pd ? `Abono ${pd.numero} · ${nombreCliente(pd.clienteId)}` : 'Abono'; }
+        else { const g = byId(S.gastos, p.ref.id); concepto = g ? `Pago: ${g.descripcion}` : 'Pago'; }
+        ledger.push({ fecha: p.fecha, concepto: concepto + (p.nota ? ` (${p.nota})` : ''), monto: p.tipo === 'cobro' ? p.monto : -p.monto });
+      }
+      for (const m of S.movimientos) {
+        if (m.cuentaId === c.id) ledger.push({ fecha: m.fecha, concepto: m.tipo === 'transferencia' ? `Transferencia a ${(byId(S.cuentas, m.destinoId) || {}).nombre || '—'}${m.concepto ? ' · ' + m.concepto : ''}` : m.concepto, monto: m.tipo === 'ingreso' ? m.monto : -m.monto, movId: m.id });
+        if (m.tipo === 'transferencia' && m.destinoId === c.id) ledger.push({ fecha: m.fecha, concepto: `Transferencia desde ${(byId(S.cuentas, m.cuentaId) || {}).nombre || '—'}${m.concepto ? ' · ' + m.concepto : ''}`, monto: m.montoDestino, movId: m.id });
+      }
+      ledger.sort((a, b) => a.fecha.localeCompare(b.fecha));
+      let run = num(c.saldoInicial);
+      ledger = ledger.map(l => Object.assign(l, { saldo: (run += l.monto) })).reverse();
+    }
+    return `
+      <div class="toolbar">
+        <button class="btn primary" data-action="nuevoMov" data-id="ingreso">+ Ingreso</button>
+        <button class="btn" data-action="nuevoMov" data-id="egreso">− Retiro / egreso</button>
+        <button class="btn" data-action="nuevoMov" data-id="transferencia">⇄ Transferencia / cambio de divisas</button>
+        <span class="spacer"></span>
+        <span class="muted">Total disponible: <b>${money(totalUSD)}</b></span>
+      </div>
+      <div class="grid kpis">
+        ${S.cuentas.map(ct => {
+          const s = saldoCuenta(ct);
+          return `<div class="card kpi" style="cursor:pointer;${ct.id === sel ? 'outline:2px solid var(--primary)' : ''}" data-action="selCuenta" data-id="${ct.id}">
+            <div class="label">${esc(ct.nombre)}</div><div class="value">${fmtCur(s, ct.moneda)}</div>
+            <div class="sub">${ct.moneda !== 'USD' ? '≈ ' + fmtCur(toUSD(s, ct.moneda), 'USD') : '&nbsp;'}</div></div>`;
+        }).join('')}
+      </div>
+      <div class="card" style="padding:0">
+        <div style="padding:12px 16px"><b>Movimientos: ${esc(c ? c.nombre : '')}</b> <span class="muted small">· Saldo inicial ${c ? fmtCur(c.saldoInicial, c.moneda) : ''}</span></div>
+        ${table(['Fecha', 'Concepto', ['Monto', 'num'], ['Saldo', 'num'], ''], ledger.map(l => `
+          <tr><td>${fmtDate(l.fecha)}</td><td>${esc(l.concepto)}</td>
+          <td class="num" style="color:${l.monto < 0 ? 'var(--danger)' : 'var(--success)'}">${fmtCur(l.monto, c.moneda)}</td>
+          <td class="num">${fmtCur(l.saldo, c.moneda)}</td>
+          <td class="actions">${l.movId ? `<button class="btn sm danger" data-action="borrarMov" data-id="${l.movId}">✕</button>` : ''}</td></tr>`), 'Sin movimientos')}
+      </div>
+      <p class="muted small">Los cobros y pagos de ventas, pedidos y gastos aparecen aquí automáticamente. Usa "Ingreso" / "Retiro" solo para
+      aportes de capital, retiros del dueño u otros movimientos que no son ventas ni gastos. Las cuentas se crean en <a href="#config">Configuración</a>.</p>`;
+  };
+  actions.selCuenta = id => { ui.cuentaSel = id; render(); };
+
+  actions.nuevoMov = tipo => {
+    const titulo = { ingreso: 'Ingreso a caja', egreso: 'Retiro / egreso de caja', transferencia: 'Transferencia entre cuentas' }[tipo];
+    openModal(titulo, `
+      <form id="f">
+        <div class="form-grid">
+          <div><label>Fecha</label><input type="date" name="fecha" value="${today()}"></div>
+          <div><label>${tipo === 'transferencia' ? 'Desde' : 'Cuenta'}</label><select name="cuentaId">${options(S.cuentas, ui.cuentaSel)}</select></div>
+          <div><label>Monto <span id="mon1"></span></label><input name="monto" type="number" step="0.01" min="0" required></div>
+          ${tipo === 'transferencia' ? `
+            <div><label>Hacia</label><select name="destinoId">${options(S.cuentas, '')}</select></div>
+            <div><label>Monto recibido <span id="mon2"></span></label><input name="montoDestino" type="number" step="0.01" min="0" required></div>` : ''}
+          <div class="full"><label>Concepto</label><input name="concepto" ${tipo === 'transferencia' ? '' : 'required'} placeholder="${tipo === 'ingreso' ? 'Ej. Aporte de capital' : tipo === 'egreso' ? 'Ej. Retiro del dueño' : 'Ej. Venta de divisas'}"></div>
+        </div>
+        <div class="form-actions"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">Guardar</button></div>
+      </form>`, root => {
+      const f = root.querySelector('#f');
+      const upd = () => {
+        const c1 = byId(S.cuentas, f.cuentaId.value);
+        root.querySelector('#mon1').textContent = c1 ? `(${CURRENCY_LABEL[c1.moneda]})` : '';
+        if (f.destinoId) {
+          const c2 = byId(S.cuentas, f.destinoId.value);
+          root.querySelector('#mon2').textContent = c2 ? `(${CURRENCY_LABEL[c2.moneda]})` : '';
+        }
+      };
+      const autoDest = () => {
+        if (!f.destinoId) return;
+        const c1 = byId(S.cuentas, f.cuentaId.value), c2 = byId(S.cuentas, f.destinoId.value);
+        if (c1 && c2) f.montoDestino.value = round2(fromUSD(toUSD(f.monto.value, c1.moneda), c2.moneda)).toFixed(2);
+      };
+      f.cuentaId.addEventListener('change', () => { upd(); autoDest(); });
+      if (f.destinoId) { f.destinoId.addEventListener('change', () => { upd(); autoDest(); }); f.monto.addEventListener('input', autoDest); }
+      upd();
+      root.querySelector('[data-close]').addEventListener('click', closeModal);
+      f.addEventListener('submit', e => {
+        e.preventDefault();
+        const d = formData(f);
+        if (tipo === 'transferencia' && d.cuentaId === d.destinoId) { toast('Elige cuentas distintas'); return; }
+        S.movimientos.push({
+          id: uid(), fecha: d.fecha, tipo, cuentaId: d.cuentaId, monto: round2(num(d.monto)), concepto: d.concepto,
+          destinoId: d.destinoId || '', montoDestino: round2(num(d.montoDestino)),
+        });
+        save(); closeModal(); render(); toast('Movimiento registrado');
+      });
+    });
+  };
+  actions.borrarMov = id => {
+    if (!confirm('¿Eliminar este movimiento?')) return;
+    S.movimientos = S.movimientos.filter(m => m.id !== id);
+    save(); render();
+  };
+
+  // ----------------------------- Clientes / proveedores ----------------------
+
+  function routeContactos(kind) {
+    const list = kind === 'clientes' ? S.clientes : S.proveedores;
+    const q = ui.q[kind] || '';
+    const rows = list.filter(c => matches(q, c.nombre, c.doc, c.telefono, c.email, c.tipo)).sort((a, b) => a.nombre.localeCompare(b.nombre));
+    return `
+      <div class="toolbar">
+        <button class="btn primary" data-action="nuevoContacto" data-id="${kind}">+ Nuevo ${kind === 'clientes' ? 'cliente' : 'proveedor'}</button>
+        <input type="search" placeholder="Buscar…" data-search="${kind}" value="${esc(q)}">
+      </div>
+      <div class="card" style="padding:0">
+        ${table(['Nombre', 'Tipo', 'RIF / CI', 'Contacto', kind === 'clientes' ? ['Comprado', 'num'] : ['Comprado a él', 'num'], ['Saldo', 'num'], ''], rows.map(c => {
+          let compras = 0, saldo = 0;
+          if (kind === 'clientes') {
+            for (const v of S.ventas.filter(v => v.clienteId === c.id)) { compras += v.total; saldo += saldoVenta(v); }
+          } else {
+            for (const g of S.gastos.filter(g => g.proveedorId === c.id)) { compras += g.total; saldo += saldoGasto(g); }
+          }
+          return `<tr><td><b>${esc(c.nombre)}</b>${c.notas ? `<div class="muted small">${esc(c.notas)}</div>` : ''}</td><td>${esc(c.tipo || '')}</td><td>${esc(c.doc || '')}</td>
+            <td class="small">${esc(c.telefono || '')}${c.email ? '<br>' + esc(c.email) : ''}</td>
+            <td class="num">${money(compras)}</td><td class="num">${saldo > 0.009 ? `<span style="color:var(--danger)">${money(saldo)}</span>` : money(0)}</td>
+            <td class="actions">${c.telefono ? `<a class="btn sm" target="_blank" rel="noopener" href="${waLink(c.telefono, `Hola ${c.nombre}, le saluda ${S.config.negocio}.`)}">WhatsApp</a>` : ''}
+            <button class="btn sm" data-action="editarContacto" data-id="${kind}:${c.id}">Editar</button>
+            <button class="btn sm danger" data-action="borrarContacto" data-id="${kind}:${c.id}">✕</button></td></tr>`;
+        }), 'Sin registros')}
+      </div>`;
+  }
+  routes.clientes = () => routeContactos('clientes');
+  routes.proveedores = () => routeContactos('proveedores');
+
+  actions.nuevoContacto = kind => formContacto(kind, null);
+  actions.editarContacto = ref => { const [kind, id] = ref.split(':'); formContacto(kind, byId(S[kind], id)); };
+  actions.borrarContacto = ref => {
+    const [kind, id] = ref.split(':');
+    const c = byId(S[kind], id);
+    if (!confirm(`¿Eliminar a ${c.nombre}? Sus documentos se conservan.`)) return;
+    S[kind] = S[kind].filter(x => x.id !== id);
+    save(); render();
+  };
+
+  function formContacto(kind, c) {
+    const tipos = kind === 'clientes'
+      ? ['Colegio', 'Empresa', 'Clínica / Hospital', 'Restaurante', 'Gobierno', 'Persona natural', 'Revendedor']
+      : ['Telas', 'Insumos (hilos, botones, cierres)', 'Taller de costura', 'Bordado / Estampado', 'Mercancía terminada', 'Servicios', 'Otro'];
+    openModal(c ? 'Editar' : (kind === 'clientes' ? 'Nuevo cliente' : 'Nuevo proveedor'), `
+      <form id="f">
+        <div class="form-grid">
+          <div class="full"><label>Nombre / razón social</label><input name="nombre" required value="${esc(c ? c.nombre : '')}"></div>
+          <div><label>Tipo</label><select name="tipo">${options(tipos, c ? c.tipo : '')}</select></div>
+          <div><label>RIF / Cédula</label><input name="doc" value="${esc(c ? c.doc : '')}"></div>
+          <div><label>Teléfono (WhatsApp)</label><input name="telefono" value="${esc(c ? c.telefono : '')}" placeholder="0414-1234567"></div>
+          <div><label>Email</label><input name="email" type="email" value="${esc(c ? c.email : '')}"></div>
+          <div class="full"><label>Dirección</label><input name="direccion" value="${esc(c ? c.direccion : '')}"></div>
+          <div class="full"><label>Notas</label><textarea name="notas">${esc(c ? c.notas : '')}</textarea></div>
+        </div>
+        <div class="form-actions"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">Guardar</button></div>
+      </form>`, root => {
+      const f = root.querySelector('#f');
+      root.querySelector('[data-close]').addEventListener('click', closeModal);
+      f.addEventListener('submit', e => {
+        e.preventDefault();
+        const d = formData(f);
+        if (c) Object.assign(c, d); else S[kind].push(Object.assign({ id: uid() }, d));
+        save(); closeModal(); render(); toast('Guardado');
+      });
+    });
+  }
+
+  // ----------------------------- Reportes ------------------------------------
+
+  routes.reportes = function () {
+    const desde = ui.repDesde, hasta = ui.repHasta;
+    const r = resultados(desde, hasta);
+    const pct = v => r.netas ? `${(v / r.netas * 100).toFixed(1)}%` : '—';
+
+    const porProd = {}, porTalla = {}, porCliente = {}, porInst = {};
+    for (const v of r.ventas) {
+      const factor = v.subtotal ? v.total / v.subtotal : 1; // reparte el descuento
+      for (const it of v.items) {
+        const ingreso = it.cant * it.precio * factor;
+        const util = ingreso - it.cant * (it.costo || 0);
+        const k = it.nombre;
+        porProd[k] = porProd[k] || { cant: 0, ingreso: 0, util: 0 };
+        porProd[k].cant += it.cant; porProd[k].ingreso += ingreso; porProd[k].util += util;
+        porTalla[it.talla || '—'] = (porTalla[it.talla || '—'] || 0) + it.cant;
+        const prod = byId(S.productos, it.productoId);
+        const inst = prod && prod.institucion ? prod.institucion : 'Sin institución';
+        porInst[inst] = (porInst[inst] || 0) + ingreso;
+      }
+      const cn = nombreCliente(v.clienteId);
+      porCliente[cn] = (porCliente[cn] || 0) + v.total;
+    }
+
+    const cobros = S.pagos.filter(p => p.tipo === 'cobro' && enRango(p.fecha, desde, hasta)).reduce((a, p) => a + p.montoUSD, 0);
+    const pagos = S.pagos.filter(p => p.tipo === 'pago' && enRango(p.fecha, desde, hasta)).reduce((a, p) => a + p.montoUSD, 0);
+    const compras = S.gastos.filter(g => g.tipo === 'compra' && enRango(g.fecha, desde, hasta)).reduce((a, g) => a + g.total, 0);
+    const maxCat = Math.max(1, ...Object.values(r.porCategoria));
+    const tallaMax = Math.max(1, ...Object.values(porTalla));
+
+    return `
+      <div class="toolbar">
+        <label style="margin:0">Desde</label><input type="date" id="repDesde" value="${desde}">
+        <label style="margin:0">Hasta</label><input type="date" id="repHasta" value="${hasta}">
+        <button class="btn sm" data-action="repRango" data-id="mes">Este mes</button>
+        <button class="btn sm" data-action="repRango" data-id="mesAnt">Mes anterior</button>
+        <button class="btn sm" data-action="repRango" data-id="anio">Este año</button>
+        <span class="spacer"></span>
+        <button class="btn sm" onclick="window.print()">🖨 Imprimir</button>
+      </div>
+      <div id="printArea">
+      <div class="grid kpis">
+        ${kpi('Ventas netas', money(r.netas), `${r.ventas.length} ventas`)}
+        ${kpi('Utilidad bruta', money(r.utilBruta), `Margen bruto ${pct(r.utilBruta)}`)}
+        ${kpi('Utilidad neta', money(r.utilNeta), `Margen neto ${pct(r.utilNeta)}`, r.utilNeta >= 0 ? 'good' : 'bad')}
+        ${kpi('Flujo de caja', money(cobros - pagos), `Cobrado ${money(cobros)} · Pagado ${money(pagos)}`, cobros - pagos >= 0 ? 'good' : 'bad')}
+      </div>
+      <div class="grid two">
+        <div class="card"><h3>Estado de resultados</h3>
+          <table class="pl-table">
+            <tr><td>Ventas brutas</td><td class="num">${money(r.bruto)}</td><td></td></tr>
+            <tr class="indent"><td>(−) Descuentos</td><td class="num">${money(r.descuentos)}</td><td></td></tr>
+            <tr class="total"><td>Ventas netas</td><td class="num">${money(r.netas)}</td><td class="num muted">100%</td></tr>
+            <tr class="indent"><td>(−) Costo de lo vendido</td><td class="num">${money(r.costo)}</td><td class="num muted">${pct(r.costo)}</td></tr>
+            <tr class="total"><td>Utilidad bruta</td><td class="num">${money(r.utilBruta)}</td><td class="num muted">${pct(r.utilBruta)}</td></tr>
+            ${Object.entries(r.porCategoria).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr class="indent"><td>(−) ${esc(k)}</td><td class="num">${money(v)}</td><td class="num muted">${pct(v)}</td></tr>`).join('')}
+            <tr class="total"><td>Total gastos operativos</td><td class="num">${money(r.totalGastos)}</td><td class="num muted">${pct(r.totalGastos)}</td></tr>
+            <tr class="total"><td>Utilidad neta</td><td class="num" style="color:${r.utilNeta >= 0 ? 'var(--success)' : 'var(--danger)'}">${money(r.utilNeta)}</td><td class="num muted">${pct(r.utilNeta)}</td></tr>
+          </table>
+          <p class="muted small">Compras de mercancía en el período: ${money(compras)} (van al inventario; se reflejan como costo cuando se venden).</p>
+        </div>
+        <div class="card"><h3>Gastos por categoría</h3>
+          ${Object.keys(r.porCategoria).length ? Object.entries(r.porCategoria).sort((a, b) => b[1] - a[1]).map(([k, v]) => `
+            <div class="bar-row"><span>${esc(k)}</span><div class="bar-track"><div class="bar-fill" style="width:${(v / maxCat * 100).toFixed(1)}%;background:var(--warning)"></div></div><span class="num">${money(v)}</span></div>`).join('') : '<p class="muted">Sin gastos en el período.</p>'}
+        </div>
+        <div class="card"><h3>Rentabilidad por producto</h3>
+          ${table(['Producto', ['Unid.', 'num'], ['Ingreso', 'num'], ['Utilidad', 'num'], ['Margen', 'num']], Object.entries(porProd).sort((a, b) => b[1].util - a[1].util).map(([k, x]) => `
+            <tr><td>${esc(k)}</td><td class="num">${x.cant}</td><td class="num">${money(x.ingreso)}</td><td class="num">${money(x.util)}</td><td class="num">${x.ingreso ? (x.util / x.ingreso * 100).toFixed(0) + '%' : '—'}</td></tr>`), 'Sin ventas')}
+        </div>
+        <div class="card"><h3>Ventas por institución</h3>
+          ${table(['Institución', ['Ventas', 'num']], Object.entries(porInst).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${money(v)}</td></tr>`), 'Sin ventas')}
+          <h3 style="margin-top:16px">Mejores clientes</h3>
+          ${table(['Cliente', ['Ventas', 'num']], Object.entries(porCliente).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${money(v)}</td></tr>`), 'Sin ventas')}
+        </div>
+        <div class="card"><h3>Unidades vendidas por talla</h3>
+          ${Object.keys(porTalla).length ? Object.entries(porTalla).sort((a, b) => b[1] - a[1]).map(([k, v]) => `
+            <div class="bar-row"><span>Talla ${esc(k)}</span><div class="bar-track"><div class="bar-fill" style="width:${(v / tallaMax * 100).toFixed(1)}%"></div></div><span class="num">${v} u.</span></div>`).join('') : '<p class="muted">Sin ventas.</p>'}
+          <p class="muted small">Úsalo para planificar la producción de la próxima temporada escolar.</p>
+        </div>
+        <div class="card"><h3>Ingresos vs egresos (6 meses)</h3>${chartMeses()}</div>
+      </div>
+      </div>`;
+  };
+  routes.reportes.after = () => {
+    $('#repDesde').addEventListener('change', e => { ui.repDesde = e.target.value; render(); });
+    $('#repHasta').addEventListener('change', e => { ui.repHasta = e.target.value; render(); });
+  };
+  actions.repRango = k => {
+    const t = today();
+    if (k === 'mes') [ui.repDesde, ui.repHasta] = monthRange(monthKey(t));
+    if (k === 'mesAnt') [ui.repDesde, ui.repHasta] = monthRange(lastMonths(2)[0]);
+    if (k === 'anio') { ui.repDesde = t.slice(0, 4) + '-01-01'; ui.repHasta = t.slice(0, 4) + '-12-31'; }
+    render();
+  };
+
+  // ----------------------------- Configuración -------------------------------
+
+  routes.config = function () {
+    const c = S.config;
+    return `
+      <div class="grid two">
+        <div class="card"><h3>Tasas de cambio (BCV)</h3>
+          <form id="fTasa">
+            <div class="form-grid">
+              <div><label>Bs por 1 USD</label><input name="tasaBs" type="number" step="0.0001" min="0" value="${c.tasaBs}" required></div>
+              <div><label>Bs por 1 EUR</label><input name="tasaEurBs" type="number" step="0.0001" min="0" value="${c.tasaEurBs}" required></div>
+              <div><label>Fecha</label><input name="tasaFecha" type="date" value="${c.tasaFecha}"></div>
+            </div>
+            <div class="form-actions" style="justify-content:flex-start">
+              <button class="btn primary">Guardar tasas</button>
+              <button type="button" class="btn" data-action="tasaOnline">Consultar tasa BCV en internet</button>
+            </div>
+          </form>
+          <p class="muted small">Los montos se guardan en dólares. Cada pago en Bs guarda la tasa del día en que se registró, así el diferencial cambiario no altera lo ya cobrado.</p>
+          ${S.historialTasas.length ? table(['Fecha', ['Bs/USD', 'num'], ['Bs/EUR', 'num']], S.historialTasas.slice(-8).reverse().map(h => `<tr><td>${fmtDate(h.fecha)}</td><td class="num">${h.tasaBs}</td><td class="num">${h.tasaEurBs}</td></tr>`)) : ''}
+        </div>
+        <div class="card"><h3>Datos del negocio</h3>
+          <form id="fNeg">
+            <div class="form-grid">
+              <div class="full"><label>Nombre</label><input name="negocio" value="${esc(c.negocio)}"></div>
+              <div><label>RIF</label><input name="rif" value="${esc(c.rif)}"></div>
+              <div><label>Teléfono</label><input name="telefono" value="${esc(c.telefono)}"></div>
+              <div class="full"><label>Dirección</label><input name="direccion" value="${esc(c.direccion)}"></div>
+            </div>
+            <button class="btn primary">Guardar</button>
+          </form>
+        </div>
+        <div class="card"><h3>Cuentas (caja, bancos, billeteras)</h3>
+          ${table(['Nombre', 'Moneda', ['Saldo inicial', 'num'], ''], S.cuentas.map(ct => `<tr><td>${esc(ct.nombre)}</td><td>${ct.moneda}</td><td class="num">${fmtCur(ct.saldoInicial, ct.moneda)}</td>
+            <td class="actions"><button class="btn sm" data-action="editarCuenta" data-id="${ct.id}">Editar</button><button class="btn sm danger" data-action="borrarCuenta" data-id="${ct.id}">✕</button></td></tr>`))}
+          <button class="btn" style="margin-top:10px" data-action="editarCuenta">+ Nueva cuenta</button>
+        </div>
+        <div class="card"><h3>Listas</h3>
+          <form id="fListas">
+            <label>Tallas predeterminadas (separadas por coma)</label><input name="tallas" value="${esc(c.tallas.join(', '))}">
+            <label style="margin-top:10px">Categorías de productos</label><textarea name="categoriasProducto">${esc(c.categoriasProducto.join(', '))}</textarea>
+            <label style="margin-top:10px">Categorías de gastos</label><textarea name="categoriasGasto">${esc(c.categoriasGasto.join(', '))}</textarea>
+            <div class="form-actions" style="justify-content:flex-start"><button class="btn primary">Guardar listas</button></div>
+          </form>
+        </div>
+        <div class="card"><h3>Respaldo de datos</h3>
+          <p class="muted small">Tus datos viven en este navegador. Descarga un respaldo con frecuencia (por ejemplo, cada semana) y guárdalo en Drive o en tu correo.
+          Con el archivo puedes pasar la información a otro equipo.</p>
+          <div class="toolbar">
+            <button class="btn primary" data-action="exportar">⬇ Descargar respaldo</button>
+            <label class="btn" style="margin:0;color:var(--text);font-size:14px">⬆ Restaurar respaldo<input type="file" id="importFile" accept="application/json" hidden></label>
+          </div>
+          <div class="toolbar">
+            <button class="btn" data-action="cargarDemo">Cargar datos de ejemplo</button>
+            <button class="btn danger" data-action="borrarTodo">Borrar todos los datos</button>
+          </div>
+        </div>
+      </div>`;
+  };
+  routes.config.after = function () {
+    $('#fTasa').addEventListener('submit', e => {
+      e.preventDefault();
+      const d = formData(e.target);
+      setTasas(num(d.tasaBs), num(d.tasaEurBs), d.tasaFecha || today());
+      toast('Tasas actualizadas');
+    });
+    $('#fNeg').addEventListener('submit', e => {
+      e.preventDefault();
+      Object.assign(S.config, formData(e.target));
+      save(); render(); toast('Datos guardados');
+    });
+    $('#fListas').addEventListener('submit', e => {
+      e.preventDefault();
+      const d = formData(e.target);
+      const split = s => s.split(',').map(x => x.trim()).filter(Boolean);
+      S.config.tallas = split(d.tallas);
+      S.config.categoriasProducto = split(d.categoriasProducto);
+      S.config.categoriasGasto = split(d.categoriasGasto);
+      save(); render(); toast('Listas guardadas');
+    });
+    $('#importFile').addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const data = JSON.parse(reader.result);
+          if (!data.config || !Array.isArray(data.ventas)) throw new Error('formato');
+          if (!confirm('Esto reemplazará todos los datos actuales por los del respaldo. ¿Continuar?')) return;
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+          S = load();
+          save(); render(); toast('Respaldo restaurado');
+        } catch (err) {
+          toast('El archivo no es un respaldo válido');
+        }
+      };
+      reader.readAsText(file);
+    });
+  };
+
+  function setTasas(tasaBs, tasaEurBs, fecha) {
+    if (tasaBs <= 0 || tasaEurBs <= 0) { toast('Las tasas deben ser mayores a cero'); return; }
+    S.config.tasaBs = tasaBs;
+    S.config.tasaEurBs = tasaEurBs;
+    S.config.tasaFecha = fecha;
+    const last = S.historialTasas[S.historialTasas.length - 1];
+    if (last && last.fecha === fecha) Object.assign(last, { tasaBs, tasaEurBs });
+    else S.historialTasas.push({ fecha, tasaBs, tasaEurBs });
+    save(); render();
+  }
+
+  actions.tasaOnline = async () => {
+    toast('Consultando…');
+    try {
+      const pick = j => num(j.promedio ?? j.venta ?? j.price ?? 0);
+      const [u, e] = await Promise.all([fetch(RATE_API.usd).then(r => r.json()), fetch(RATE_API.eur).then(r => r.json())]);
+      const usd = pick(u), eur = pick(e);
+      if (!usd) throw new Error('sin datos');
+      const fecha = (u.fechaActualizacion || '').slice(0, 10) || today();
+      if (confirm(`Tasa BCV encontrada:\n$1 = Bs ${usd}\n€1 = Bs ${eur || '(sin dato)'}\nFecha: ${fmtDate(fecha)}\n\n¿Aplicar?`)) {
+        setTasas(usd, eur || S.config.tasaEurBs, fecha);
+        toast('Tasas actualizadas');
+      }
+    } catch (err) {
+      toast('No se pudo consultar. Ingresa la tasa manualmente (bcv.org.ve).');
+    }
+  };
+
+  actions.editarCuenta = id => {
+    const c = id ? byId(S.cuentas, id) : null;
+    openModal(c ? 'Editar cuenta' : 'Nueva cuenta', `
+      <form id="f">
+        <div class="form-grid">
+          <div class="full"><label>Nombre</label><input name="nombre" required value="${esc(c ? c.nombre : '')}" placeholder="Ej. Banesco, Binance, Caja chica"></div>
+          <div><label>Moneda</label><select name="moneda" ${c ? 'disabled' : ''}>${options([{ id: 'USD', nombre: 'Dólares' }, { id: 'VES', nombre: 'Bolívares' }, { id: 'EUR', nombre: 'Euros' }], c ? c.moneda : 'USD')}</select></div>
+          <div><label>Saldo inicial</label><input name="saldoInicial" type="number" step="0.01" value="${c ? c.saldoInicial : 0}"></div>
+        </div>
+        <div class="form-actions"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">Guardar</button></div>
+      </form>`, root => {
+      const f = root.querySelector('#f');
+      root.querySelector('[data-close]').addEventListener('click', closeModal);
+      f.addEventListener('submit', e => {
+        e.preventDefault();
+        const d = formData(f);
+        if (c) Object.assign(c, { nombre: d.nombre, saldoInicial: num(d.saldoInicial) });
+        else S.cuentas.push({ id: uid(), nombre: d.nombre, moneda: d.moneda, saldoInicial: num(d.saldoInicial) });
+        save(); closeModal(); render();
+      });
+    });
+  };
+  actions.borrarCuenta = id => {
+    const usada = S.pagos.some(p => p.cuentaId === id) || S.movimientos.some(m => m.cuentaId === id || m.destinoId === id);
+    if (usada) { toast('La cuenta tiene movimientos; no se puede eliminar'); return; }
+    if (!confirm('¿Eliminar la cuenta?')) return;
+    S.cuentas = S.cuentas.filter(c => c.id !== id);
+    save(); render();
+  };
+
+  actions.exportar = () => {
+    const blob = new Blob([JSON.stringify(S, null, 2)], { type: 'application/json' });
+    downloadBlob(`respaldo-${S.config.negocio.replace(/\W+/g, '-').toLowerCase()}-${today()}.json`, blob);
+  };
+  actions.borrarTodo = () => {
+    if (!confirm('¿Borrar TODOS los datos? Descarga un respaldo antes. Esta acción no se puede deshacer.')) return;
+    if (prompt('Escribe BORRAR para confirmar') !== 'BORRAR') return;
+    S = defaultState();
+    save(); location.hash = '#panel'; render(); toast('Datos borrados');
+  };
+
+  // ----------------------------- Exportación ---------------------------------
+
+  function downloadBlob(name, blob) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  }
+  function downloadCSV(name, rows) {
+    const csv = rows.map(r => r.map(v => {
+      const s = String(v ?? '');
+      return /[",;\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    }).join(';')).join('\n');
+    downloadBlob(name, new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
+  }
+
+  // ----------------------------- Datos de ejemplo ----------------------------
+
+  actions.cargarDemo = () => {
+    if ((S.ventas.length || S.productos.length) && !confirm('Esto reemplazará tus datos actuales por datos de ejemplo. ¿Continuar?')) return;
+    S = defaultState();
+    const [efUsd, efBs, banco, zelle] = S.cuentas;
+    efUsd.saldoInicial = 800; banco.saldoInicial = 15000;
+
+    const cl = (nombre, tipo, telefono) => { const c = { id: uid(), nombre, tipo, doc: '', telefono, email: '', direccion: '', notas: '' }; S.clientes.push(c); return c; };
+    const colegio = cl('U.E. Colegio San José', 'Colegio', '0414-5550101');
+    const clinica = cl('Clínica Santa María', 'Clínica / Hospital', '0424-5550202');
+    const empresa = cl('Constructora Andina C.A.', 'Empresa', '0412-5550303');
+    const maria = cl('María Pérez', 'Persona natural', '0416-5550404');
+
+    const pv = (nombre, tipo) => { const p = { id: uid(), nombre, tipo, doc: '', telefono: '', email: '', direccion: '', notas: '' }; S.proveedores.push(p); return p; };
+    const telas = pv('Textiles El Centro', 'Telas');
+    const taller = pv('Taller de Costura Rosa', 'Taller de costura');
+    pv('Bordados Express', 'Bordado / Estampado');
+
+    const prod = (nombre, categoria, institucion, costo, precio, tallas, stockBase) => {
+      const p = { id: uid(), nombre, categoria, institucion, color: '', sku: '', costo, precio, minimo: 3, variantes: tallas.map((t, i) => ({ talla: t, stock: Math.max(0, stockBase - i) })) };
+      S.productos.push(p); return p;
+    };
+    const chemB = prod('Chemise blanca primaria', 'Chemise', 'U.E. Colegio San José', 4.5, 9, ['4', '6', '8', '10', '12'], 14);
+    const chemA = prod('Chemise azul bachillerato', 'Chemise', 'U.E. Colegio San José', 5, 10, ['S', 'M', 'L', 'XL'], 10);
+    const pant = prod('Pantalón azul marino escolar', 'Pantalón', 'U.E. Colegio San José', 7, 14, ['6', '8', '10', '12', '14', '16'], 9);
+    const bata = prod('Uniforme quirúrgico (filipina + pantalón)', 'Bata / Uniforme médico', 'Clínica Santa María', 11, 22, ['S', 'M', 'L', 'XL'], 6);
+    const braga = prod('Braga industrial con reflectivo', 'Braga / Industrial', 'Constructora Andina C.A.', 14, 26, ['M', 'L', 'XL', 'XXL'], 4);
+
+    // 4 ciclos de 30 días hacia atrás desde hoy (el último es el más reciente).
+    const ciclos = [3, 2, 1, 0];
+    const venta = (fecha, cliente, lineas, pagado, cuenta, vence) => {
+      const v = crearVenta({ fecha, clienteId: cliente ? cliente.id : '', vence, descuento: 0, notas: '', lines: lineas.map(([p, talla, cant]) => ({ productoId: p.id, talla, cant, precio: p.precio })) });
+      if (pagado) registrarPago({ tipo: 'cobro', kind: 'venta', id: v.id, cuentaId: cuenta.id, monto: cuenta.moneda === 'VES' ? v.total * pagado * S.config.tasaBs : v.total * pagado, fecha });
+    };
+    for (const c of ciclos) {
+      const base = addDays(today(), -(c * 30 + 29));
+      const dia = d => addDays(base, d);
+      const reciente = c === 0;
+      // reponer stock al inicio de cada ciclo
+      for (const p of S.productos) for (const v of p.variantes) if (v.stock < 6) ajustarStock(p.id, v.talla, 10, 'entrada', 'Producción taller', dia(0));
+      venta(dia(2), maria, [[chemB, '8', 2], [pant, '10', 1]], 1, efUsd);
+      venta(dia(5), null, [[chemA, 'M', 2]], 1, banco);
+      venta(dia(9), colegio, [[chemB, '6', 4], [chemB, '10', 3], [pant, '12', 3]], 0.5, zelle, dia(24));
+      venta(dia(14), clinica, [[bata, 'M', 2], [bata, 'L', 1]], reciente ? 0 : 1, zelle, dia(reciente ? 40 : 27));
+      venta(dia(19), null, [[chemB, '4', 1], [chemA, 'S', 1]], 1, efBs);
+      venta(dia(23), empresa, [[braga, 'L', 2]], 1, zelle);
+      venta(dia(27), null, [[pant, '8', 1], [chemB, '8', 1]], 1, banco);
+      // ventas de mostrador durante el ciclo
+      [1, 4, 7, 10, 12, 16, 18, 21, 24, 26, 29].forEach((d, k) => {
+        const lineas = k % 3 === 0 ? [[chemB, ['6', '8', '10'][k % 3], 2], [pant, '10', 1]] : k % 3 === 1 ? [[chemA, 'L', 2], [pant, '14', 1]] : [[chemB, '12', 1], [bata, 'S', 1]];
+        venta(dia(d), k % 4 === 0 ? maria : null, lineas, 1, [efUsd, banco, efBs, zelle][k % 4]);
+      });
+      const g = (d, categoria, descripcion, total, prov, pagar = true) => {
+        const fecha = dia(d);
+        const gg = { id: uid(), tipo: 'gasto', fecha, categoria, descripcion, proveedorId: prov ? prov.id : '', moneda: 'USD', montoOriginal: total, total, vence: pagar ? '' : addDays(fecha, 15), items: [] };
+        S.gastos.push(gg);
+        if (pagar) registrarPago({ tipo: 'pago', kind: 'gasto', id: gg.id, cuentaId: efUsd.id, monto: total, fecha });
+      };
+      g(0, 'Alquiler', 'Alquiler local', 120);
+      g(4, 'Costura / Maquila', 'Costura lote', 80, taller, !reciente);
+      g(11, 'Servicios (luz, agua, internet)', 'Internet y luz', 25);
+      g(17, 'Publicidad', 'Publicidad Instagram', 20);
+      g(25, 'Telas e insumos', 'Hilos, botones y entretela', 35, telas, !reciente);
+    }
+
+    const ped = { id: uid(), numero: 'P-' + pad(S.config.seq.pedido++), fecha: today(), clienteId: empresa.id, entrega: addDays(today(), 12), estado: 'En producción', notas: 'Logo bordado en pecho izquierdo, reflectivo en espalda', items: [{ productoId: braga.id, descripcion: braga.nombre, talla: 'L', personalizacion: 'Logo bordado', cant: 10, precio: 26 }, { productoId: braga.id, descripcion: braga.nombre, talla: 'XL', personalizacion: 'Logo bordado', cant: 6, precio: 26 }], ventaId: '' };
+    ped.total = round2(ped.items.reduce((a, i) => a + i.cant * i.precio, 0));
+    S.pedidos.push(ped);
+    registrarPago({ tipo: 'cobro', kind: 'pedido', id: ped.id, cuentaId: zelle.id, monto: round2(ped.total / 2), fecha: today(), nota: 'Abono 50%' });
+    const ped2 = { id: uid(), numero: 'P-' + pad(S.config.seq.pedido++), fecha: today(), clienteId: colegio.id, entrega: addDays(today(), 30), estado: 'Cotizado', notas: 'Temporada escolar: 40 chemises con escudo', items: [{ productoId: '', descripcion: 'Chemise blanca con escudo bordado', talla: '', personalizacion: 'Escudo del colegio', cant: 40, precio: 10 }], ventaId: '' };
+    ped2.total = 400;
+    S.pedidos.push(ped2);
+
+    S.historialTasas.push({ fecha: today(), tasaBs: S.config.tasaBs, tasaEurBs: S.config.tasaEurBs });
+    save(); closeModal(); location.hash = '#panel'; render(); toast('Datos de ejemplo cargados');
+  };
+
+  // ---------------------------------------------------------------------------
+  render();
+})();

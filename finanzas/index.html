@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Second Shift · Finanzas</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-logo">SS</div>
+        <div>
+          <div class="brand-name" id="brandName">Second Shift</div>
+          <div class="brand-sub">Uniformes · Finanzas</div>
+        </div>
+      </div>
+      <nav class="nav" id="nav">
+        <a href="#panel" data-route="panel">📊 Panel</a>
+        <a href="#ventas" data-route="ventas">🧾 Ventas</a>
+        <a href="#pedidos" data-route="pedidos">🧵 Pedidos</a>
+        <a href="#inventario" data-route="inventario">👕 Inventario</a>
+        <a href="#gastos" data-route="gastos">💸 Compras y gastos</a>
+        <a href="#cobrar" data-route="cobrar">📥 Por cobrar</a>
+        <a href="#pagar" data-route="pagar">📤 Por pagar</a>
+        <a href="#caja" data-route="caja">🏦 Caja y bancos</a>
+        <a href="#clientes" data-route="clientes">👥 Clientes</a>
+        <a href="#proveedores" data-route="proveedores">🚚 Proveedores</a>
+        <a href="#reportes" data-route="reportes">📈 Reportes</a>
+        <a href="#config" data-route="config">⚙️ Configuración</a>
+      </nav>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn menu-btn" id="menuBtn" aria-label="Menú">☰</button>
+        <h1 id="pageTitle">Panel</h1>
+        <div class="rate-box" id="rateBox" title="Editar tasas en Configuración"></div>
+        <select id="viewCurrency" class="currency-select" aria-label="Moneda de visualización">
+          <option value="USD">USD $</option>
+          <option value="VES">Bs</option>
+          <option value="EUR">EUR €</option>
+        </select>
+      </header>
+      <main class="content" id="view"></main>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2 id="modalTitle"></h2>
+        <button class="icon-btn" id="modalClose" aria-label="Cerrar">✕</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

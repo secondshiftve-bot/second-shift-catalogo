@@ -286,3 +286,7 @@ td.actions { white-space: nowrap; text-align: right; }
 #syncBadge:empty { display: none; }
 @media (max-width: 860px) { #syncBadge { font-size: 10px; max-width: 110px; } .topbar { gap: 8px; } }
 @media (prefers-reduced-motion: reduce) { .sidebar { transition: none; } }
+
+/* Inventario por color */
+.var-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 2px 0; }
+.var-color { font-size: 12px; font-weight: 600; min-width: 110px; }

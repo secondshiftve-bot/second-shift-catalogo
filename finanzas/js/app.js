@@ -36,9 +36,10 @@
       tasaBs: 36.5,
       tasaEurBs: 39.8,
       tasaFecha: today(),
-      tallas: ['2', '4', '6', '8', '10', '12', '14', '16', 'XS', 'S', 'M', 'L', 'XL', 'XXL'],
-      categoriasProducto: ['Chemise', 'Camisa', 'Pantalón', 'Falda', 'Short', 'Mono / Deportivo', 'Bata / Uniforme médico', 'Braga / Industrial', 'Chaqueta', 'Accesorios'],
-      categoriasGasto: ['Telas e insumos', 'Costura / Maquila', 'Bordado / Estampado', 'Nómina', 'Alquiler', 'Servicios (luz, agua, internet)', 'Transporte / Envíos', 'Publicidad', 'Comisiones bancarias', 'Impuestos', 'Mantenimiento', 'Otros'],
+      tallas: ['Regular XS', 'Regular S', 'Regular M', 'Regular L', 'Regular XL', 'Petite S', 'Petite M', 'Tall S', 'Tall M', 'Tall L'],
+      categoriasProducto: ['Top mujer', 'Pantalón mujer', 'Underscrub mujer', 'Top hombre', 'Pantalón hombre', 'Accesorios'],
+      categoriasGasto: ['Envío internacional', 'Packaging / embalaje', 'Diseño y marca', 'Publicidad', 'Comisiones bancarias', 'Diferencial cambiario', 'Transporte local / delivery', 'Impuestos', 'Otros'],
+      sets: [],
     };
   }
 
@@ -420,13 +421,23 @@
     return '<span class="badge info">Pendiente</span>';
   }
 
+  // Cada variante es un color + una talla. Su clave ("Black · Regular M") es lo que
+  // guardan las ventas, compras y movimientos en el campo `talla`.
+  const SEP = ' · ';
+  function vk(v) { return v.color ? `${v.color}${SEP}${v.talla}` : v.talla; }
+  function splitKey(key) {
+    const i = String(key || '').lastIndexOf(SEP);
+    return i < 0 ? { color: '', talla: key || '' } : { color: key.slice(0, i), talla: key.slice(i + SEP.length) };
+  }
+  function findVar(p, key) { return (p && p.variantes || []).find(v => vk(v) === key); }
+  function coloresDe(p) { return [...new Set((p.variantes || []).map(v => v.color || ''))]; }
   function stockTotal(p) { return (p.variantes || []).reduce((a, v) => a + (Number(v.stock) || 0), 0); }
-  function stockDe(p, talla) { const v = (p.variantes || []).find(x => x.talla === talla); return v ? Number(v.stock) || 0 : 0; }
+  function stockDe(p, key) { const v = findVar(p, key); return v ? Number(v.stock) || 0 : 0; }
   function ajustarStock(productoId, talla, delta, tipo, nota, fecha) {
     const p = byId(S.productos, productoId);
     if (!p) return;
-    let v = p.variantes.find(x => x.talla === talla);
-    if (!v) { v = { talla, stock: 0 }; p.variantes.push(v); }
+    let v = findVar(p, talla);
+    if (!v) { v = Object.assign(splitKey(talla), { stock: 0 }); p.variantes.push(v); }
     v.stock = (Number(v.stock) || 0) + delta;
     S.movInv.push({ id: uid(), fecha: fecha || today(), productoId, talla, cant: delta, tipo, nota: nota || '' });
   }
@@ -638,17 +649,17 @@
     function blank() { return { productoId: '', talla: '', descripcion: '', personalizacion: '', cant: 1, precio: 0 }; }
 
     function render() {
-      const prodOpts = S.productos.map(p => ({ id: p.id, nombre: `${p.nombre}${p.institucion ? ' · ' + p.institucion : ''}` }));
+      const prodOpts = [...S.productos].sort((a, b) => a.nombre.localeCompare(b.nombre)).map(p => ({ id: p.id, nombre: p.nombre }));
       const rows = lines.map((l, i) => {
         const p = byId(S.productos, l.productoId);
-        const tallas = p ? p.variantes.map(v => v.talla) : S.config.tallas;
+        const tallas = p ? p.variantes.filter(v => mode !== 'venta' || v.stock > 0 || vk(v) === l.talla).map(vk) : S.config.tallas;
         const stockInfo = p && mode === 'venta' && l.talla ? `<div class="muted small">Stock: ${stockDe(p, l.talla)}</div>` : '';
         return `<tr data-i="${i}">
           <td style="min-width:200px">
             <select data-f="productoId">${options(prodOpts, l.productoId, { empty: isPedido ? '— Prenda personalizada —' : '— Selecciona —' })}</select>
             ${isPedido ? `<input data-f="descripcion" placeholder="Descripción" value="${esc(l.descripcion)}" style="margin-top:4px">` : ''}
           </td>
-          <td style="min-width:80px"><select data-f="talla">${options(tallas, l.talla, { empty: '—' })}</select>${stockInfo}</td>
+          <td style="min-width:150px"><select data-f="talla">${options(tallas, l.talla, { empty: '—' })}</select>${stockInfo}</td>
           ${isPedido ? `<td style="min-width:150px"><input data-f="personalizacion" placeholder="Bordado, logo, nombre…" value="${esc(l.personalizacion)}"></td>` : ''}
           <td><input class="w-qty" data-f="cant" type="number" min="1" step="1" value="${l.cant}"></td>
           <td><input class="w-price" data-f="precio" type="number" min="0" step="0.01" value="${l.precio}"></td>
@@ -658,14 +669,34 @@
       }).join('');
       container.innerHTML = `
         <div class="table-wrap"><table class="lines">
-          <thead><tr><th>Producto</th><th>Talla</th>${isPedido ? '<th>Personalización</th>' : ''}<th>Cant.</th><th>${mode === 'compra' ? 'Costo $' : 'Precio $'}</th><th class="num">Subtotal</th><th></th></tr></thead>
+          <thead><tr><th>Producto</th><th>Color · talla</th>${isPedido ? '<th>Personalización</th>' : ''}<th>Cant.</th><th>${mode === 'compra' ? 'Costo $' : 'Precio $'}</th><th class="num">Subtotal</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table></div>
-        <button type="button" class="btn sm" data-add style="margin-top:8px">+ Agregar renglón</button>`;
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+          <button type="button" class="btn sm" data-add>+ Agregar renglón</button>
+          ${mode !== 'compra' && (S.config.sets || []).length ? `<select data-set style="width:auto">${options((S.config.sets || []).map(x => ({ id: x.id, nombre: `${x.nombre} (top + pantalón)` })), '', { empty: '+ Agregar un set…' })}</select>` : ''}
+        </div>`;
       if (onChange) onChange();
     }
 
     container.addEventListener('change', e => {
+      if (e.target.matches('[data-set]')) {
+        const set = (S.config.sets || []).find(x => x.id === e.target.value);
+        if (set) {
+          lines = lines.filter(l => l.productoId || (l.descripcion || '').trim());
+          const top = byId(S.productos, set.topId), pant = byId(S.productos, set.pantId);
+          const hay = (p, c) => p && p.variantes.some(v => v.color === c && v.stock > 0);
+          // Primer color con ambas piezas disponibles; si no hay, el primero del top.
+          const color = (top ? coloresDe(top) : []).find(c => hay(top, c) && hay(pant, c)) || (top ? coloresDe(top)[0] : '');
+          for (const p of [top, pant]) {
+            if (!p) continue;
+            const v = p.variantes.find(x => x.color === color && x.stock > 0) || p.variantes.find(x => x.stock > 0) || p.variantes[0];
+            lines.push(Object.assign(blank(), { productoId: p.id, descripcion: p.nombre, talla: v ? vk(v) : '', precio: Number(p[priceKey]) || 0, personalizacion: isPedido ? set.nombre : '' }));
+          }
+          render();
+        }
+        return;
+      }
       const tr = e.target.closest('tr[data-i]');
       if (!tr) return;
       const i = Number(tr.dataset.i);
@@ -677,7 +708,10 @@
         if (p) {
           l.precio = Number(p[priceKey]) || 0;
           l.descripcion = p.nombre;
-          if (!p.variantes.some(v => v.talla === l.talla)) l.talla = p.variantes[0] ? p.variantes[0].talla : '';
+          if (!findVar(p, l.talla)) {
+            const v = p.variantes.find(x => mode !== 'venta' || x.stock > 0) || p.variantes[0];
+            l.talla = v ? vk(v) : '';
+          }
         }
         render();
       } else if (f === 'talla') {
@@ -819,8 +853,8 @@
     const empezar = !S.productos.length && !S.ventas.length ? `
       <div class="card">
         <h3>👋 Bienvenido</h3>
-        <p>Empieza registrando tus productos en <a href="#inventario">Inventario</a> (con tallas y stock),
-        tus <a href="#clientes">clientes</a> (colegios, empresas, clínicas) y ajusta la <a href="#config">tasa BCV</a>.
+        <p>Empieza registrando tus productos en <a href="#inventario">Inventario</a> (con colores, tallas y piezas),
+        tus <a href="#clientes">clientes</a> y ajusta la <a href="#config">tasa BCV</a>.
         ¿Quieres ver cómo funciona primero?</p>
         <button class="btn primary" data-action="cargarDemo">Cargar datos de ejemplo</button>
       </div>` : '';
@@ -857,8 +891,8 @@
             <td>${estadoBadge(p.estado)}</td><td class="num">${money(saldoPedido(p))}</td></tr>`), 'No hay pedidos pendientes 🎉')}
         </div>
         <div class="card"><h3>Stock bajo</h3>
-          ${table(['Producto', 'Tallas en mínimo'], bajos.map(p => `
-            <tr><td>${esc(p.nombre)}</td><td>${p.variantes.filter(v => v.stock <= p.minimo).map(v => `<span class="badge ${v.stock <= 0 ? 'bad' : 'warn'}">${esc(v.talla)}: ${v.stock}</span>`).join(' ')}</td></tr>`), 'Todo el inventario está sobre el mínimo')}
+          ${table(['Producto', 'Color · talla en mínimo'], bajos.map(p => `
+            <tr><td>${esc(p.nombre)}</td><td>${p.variantes.filter(v => v.stock <= p.minimo).map(v => `<span class="badge ${v.stock <= 0 ? 'bad' : 'warn'}">${esc(vk(v))}: ${v.stock}</span>`).join(' ')}</td></tr>`), 'Ningún producto tiene aviso de mínimo activado')}
         </div>
       </div>`;
   };
@@ -1140,7 +1174,7 @@
         </select>
         <input type="search" placeholder="Buscar…" data-search="pedidos" value="${esc(q)}">
         <span class="spacer"></span>
-        <span class="muted small">Pedidos para colegios, empresas o encargos con bordado. Al entregarlos se convierten en venta.</span>
+        <span class="muted small">Encargos y apartados (por ejemplo, piezas que hay que pedir a Jaanuu o bordar). Al entregarlos se convierten en venta.</span>
       </div>
       <div class="card" style="padding:0">
         ${table(['#', 'Cliente', 'Prendas', 'Entrega', 'Estado', ['Total', 'num'], ['Abonado', 'num'], ['Saldo', 'num'], ''], list.map(p => {
@@ -1261,35 +1295,49 @@
     const cat = ui.invCat || '';
     const list = S.productos
       .filter(p => !cat || p.categoria === cat)
-      .filter(p => matches(q, p.nombre, p.sku, p.institucion, p.categoria, p.color))
-      .sort((a, b) => a.nombre.localeCompare(b.nombre));
+      .filter(p => matches(q, p.nombre, p.sku, p.tela, p.categoria, ...coloresDe(p)))
+      .sort((a, b) => (a.categoria || '').localeCompare(b.categoria || '') || a.nombre.localeCompare(b.nombre));
     const totalUnid = list.reduce((a, p) => a + stockTotal(p), 0);
     const valor = list.reduce((a, p) => a + stockTotal(p) * (Number(p.costo) || 0), 0);
+    const sets = S.config.sets || [];
     return `
       <div class="toolbar">
         <button class="btn primary" data-action="nuevoProducto">+ Nuevo producto</button>
         <button class="btn" data-action="ajusteInv">± Ajuste / entrada</button>
         <select id="catFiltro">${options(S.config.categoriasProducto, cat, { empty: 'Todas las categorías' })}</select>
-        <input type="search" placeholder="Buscar producto, colegio, SKU…" data-search="inv" value="${esc(q)}">
+        <input type="search" placeholder="Buscar modelo, color, tela…" data-search="inv" value="${esc(q)}">
         <span class="spacer"></span>
-        <span class="muted">${totalUnid} unidades · ${money(valor)} al costo</span>
+        <span class="muted">${totalUnid} piezas · ${money(valor)} al costo</span>
         <button class="btn sm" data-action="verMovInv">Movimientos</button>
         <button class="btn sm" data-action="csvInventario">⬇ CSV</button>
       </div>
       <div class="card" style="padding:0">
-        ${table(['Producto', 'Institución', 'Stock por talla', ['Total', 'num'], ['Costo', 'num'], ['Precio', 'num'], ['Margen', 'num'], ''], list.map(p => {
+        ${table(['Producto', 'Disponible por color y talla', ['Piezas', 'num'], ['Costo', 'num'], ['Precio', 'num'], ['Margen', 'num'], ''], list.map(p => {
           const margen = p.precio ? (p.precio - p.costo) / p.precio : 0;
+          const porColor = coloresDe(p).map(c => {
+            const vs = p.variantes.filter(v => (v.color || '') === c);
+            return `<div class="var-row"><span class="var-color">${esc(c || 'Sin color')}</span> ${vs.map(v => `<span class="badge ${v.stock < 0 ? 'bad' : v.stock === 0 ? '' : v.stock <= (p.minimo || 0) ? 'warn' : 'ok'}">${esc(v.talla)}: ${v.stock}</span>`).join(' ')}</div>`;
+          }).join('');
           return `<tr>
-            <td><b>${esc(p.nombre)}</b><div class="muted small">${esc(p.categoria || '')}${p.sku ? ' · ' + esc(p.sku) : ''}${p.color ? ' · ' + esc(p.color) : ''}</div></td>
-            <td>${esc(p.institucion || '—')}</td>
-            <td>${p.variantes.map(v => `<span class="badge ${v.stock <= 0 ? 'bad' : v.stock <= (p.minimo || 0) ? 'warn' : ''}" title="Talla ${esc(v.talla)}">${esc(v.talla)}: ${v.stock}</span>`).join(' ')}</td>
+            <td><b>${esc(p.nombre)}</b><div class="muted small">${esc(p.categoria || '')}${p.tela ? ' · ' + esc(p.tela) : ''}${p.sku ? ' · ' + esc(p.sku) : ''}</div></td>
+            <td>${porColor}</td>
             <td class="num">${stockTotal(p)}</td>
             <td class="num">${money(p.costo)}</td><td class="num">${money(p.precio)}</td>
             <td class="num">${(margen * 100).toFixed(0)}%</td>
             <td class="actions"><button class="btn sm" data-action="editarProducto" data-id="${p.id}">Editar</button>
               <button class="btn sm danger" data-action="borrarProducto" data-id="${p.id}">✕</button></td></tr>`;
-        }), 'No hay productos. Crea el primero (ej. "Chemise azul primaria").')}
-      </div>`;
+        }), 'No hay productos todavía. Crea el primero con "+ Nuevo producto".')}
+      </div>
+      ${sets.length ? `<div class="card"><h3>Sets (top + pantalón)</h3>
+        ${table(['Set', 'Top', 'Pantalón', 'Colores con ambas piezas', ['Precio', 'num']], sets.map(x => {
+          const t = byId(S.productos, x.topId), pa = byId(S.productos, x.pantId);
+          const cols = t && pa ? coloresDe(t).filter(c => c && t.variantes.some(v => v.color === c && v.stock > 0) && pa.variantes.some(v => v.color === c && v.stock > 0)) : [];
+          return `<tr><td><b>${esc(x.nombre)}</b><div class="muted small">${esc(x.cat || '')}${x.tela ? ' · ' + esc(x.tela) : ''}</div></td>
+            <td>${esc(t ? t.nombre : '—')}</td><td>${esc(pa ? pa.nombre : '—')}</td>
+            <td>${cols.length ? cols.map(c => `<span class="badge">${esc(c)}</span>`).join(' ') : '<span class="muted">Ninguno completo</span>'}</td>
+            <td class="num">${money((t ? t.precio : 0) + (pa ? pa.precio : 0))}</td></tr>`;
+        }))}
+        <p class="muted small">En una venta o pedido usa "+ Agregar un set…" para añadir el top y el pantalón juntos.</p></div>` : ''}`;
   };
   routes.inventario.after = () => {
     $('#catFiltro').addEventListener('change', e => { ui.invCat = e.target.value; render(); });
@@ -1299,71 +1347,78 @@
   actions.editarProducto = id => formProducto(byId(S.productos, id));
 
   function formProducto(p) {
-    const tallasActuales = p ? p.variantes.map(v => v.talla) : [];
-    const todas = [...new Set([...S.config.tallas, ...tallasActuales])];
+    const colores = [...new Set(S.productos.flatMap(coloresDe).filter(Boolean))].sort();
+    const tallas = [...new Set([...S.config.tallas, ...S.productos.flatMap(x => x.variantes.map(v => v.talla))])];
+    let vars = p ? p.variantes.map(v => ({ color: v.color || '', talla: v.talla, stock: v.stock })) : [{ color: '', talla: tallas[0] || '', stock: 0 }];
     openModal(p ? 'Editar producto' : 'Nuevo producto', `
       <form id="f">
         <div class="form-grid">
-          <div class="full"><label>Nombre</label><input name="nombre" required value="${esc(p ? p.nombre : '')}" placeholder="Ej. Chemise blanca bordada"></div>
+          <div class="full"><label>Modelo</label><input name="nombre" required value="${esc(p ? p.nombre : '')}" placeholder="Ej. Calix Fit & Flare Scrub Top"></div>
           <div><label>Categoría</label><select name="categoria">${options(S.config.categoriasProducto, p ? p.categoria : '')}</select></div>
-          <div><label>Institución / cliente (colegio, empresa)</label><input name="institucion" value="${esc(p ? p.institucion : '')}" list="instList"></div>
-          <div><label>Color / tela</label><input name="color" value="${esc(p ? p.color : '')}"></div>
-          <div><label>SKU / código</label><input name="sku" value="${esc(p ? p.sku : '')}"></div>
-          <div><label>Costo unitario ($)</label><input name="costo" type="number" step="0.01" min="0" value="${p ? p.costo : ''}" required></div>
+          <div><label>Tela / línea</label><input name="tela" value="${esc(p ? p.tela || '' : '')}" placeholder="ULTRAsoft™, ULTRALite™…"></div>
+          <div><label>Código / referencia</label><input name="sku" value="${esc(p ? p.sku : '')}"></div>
+          <div><label>Costo por pieza ($)</label><input name="costo" type="number" step="0.01" min="0" value="${p ? p.costo : ''}" required></div>
           <div><label>Precio de venta ($)</label><input name="precio" type="number" step="0.01" min="0" value="${p ? p.precio : ''}" required></div>
-          <div><label>Stock mínimo por talla</label><input name="minimo" type="number" step="1" min="0" value="${p ? p.minimo : 3}"></div>
+          <div><label>Avisar cuando queden (piezas)</label><input name="minimo" type="number" step="1" min="0" value="${p ? p.minimo : 0}"></div>
           <div><label>Margen</label><div id="margen" class="muted" style="padding:8px 0">—</div></div>
         </div>
-        <datalist id="instList">${[...new Set(S.productos.map(x => x.institucion).filter(Boolean))].map(i => `<option value="${esc(i)}">`).join('')}</datalist>
-        <label>Tallas y stock ${p ? '(el stock se ajusta mejor desde "Ajuste / entrada" para dejar registro)' : 'inicial'}</label>
-        <div class="size-grid">
-          ${todas.map(t => {
-            const v = p && p.variantes.find(x => x.talla === t);
-            return `<div><label><input type="checkbox" data-talla="${esc(t)}" ${v ? 'checked' : ''} style="width:auto"> ${esc(t)}</label>
-              <input type="number" step="1" data-stock="${esc(t)}" value="${v ? v.stock : 0}"></div>`;
-          }).join('')}
-        </div>
-        <div style="margin-top:8px"><input id="tallaExtra" placeholder="Otra talla (ej. 18, 3XL) y Enter" style="max-width:240px"></div>
+        <datalist id="colorList">${colores.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+        <label>Colores, tallas y piezas ${p ? '(para entradas y salidas usa mejor "Ajuste / entrada", así queda registro)' : 'iniciales'}</label>
+        <div id="vars"></div>
         <div class="form-actions"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">Guardar</button></div>
       </form>`, root => {
       const f = root.querySelector('#f');
+      const box = root.querySelector('#vars');
+      const drawVars = () => {
+        box.innerHTML = `<div class="table-wrap"><table class="lines"><thead><tr><th>Color</th><th>Talla</th><th>Piezas</th><th></th></tr></thead><tbody>
+          ${vars.map((v, i) => `<tr data-v="${i}">
+            <td><input data-vf="color" list="colorList" value="${esc(v.color)}" placeholder="Black"></td>
+            <td><select data-vf="talla">${options(tallas, v.talla)}</select></td>
+            <td><input class="w-qty" data-vf="stock" type="number" step="1" value="${v.stock}"></td>
+            <td><button type="button" class="icon-btn" data-vdel="${i}" title="Quitar">✕</button></td></tr>`).join('')}
+          </tbody></table></div>
+          <button type="button" class="btn sm" data-vadd style="margin-top:8px">+ Agregar color / talla</button>`;
+      };
+      drawVars();
+      box.addEventListener('input', e => {
+        const tr = e.target.closest('[data-v]'); if (!tr) return;
+        const v = vars[Number(tr.dataset.v)]; const k = e.target.dataset.vf;
+        v[k] = k === 'stock' ? (parseInt(e.target.value, 10) || 0) : e.target.value;
+      });
+      box.addEventListener('change', e => {
+        const tr = e.target.closest('[data-v]'); if (!tr) return;
+        if (e.target.dataset.vf === 'talla') vars[Number(tr.dataset.v)].talla = e.target.value;
+      });
+      box.addEventListener('click', e => {
+        if (e.target.closest('[data-vadd]')) { const last = vars[vars.length - 1]; vars.push({ color: last ? last.color : '', talla: tallas[0] || '', stock: 0 }); drawVars(); }
+        const d = e.target.closest('[data-vdel]');
+        if (d) { vars.splice(Number(d.dataset.vdel), 1); drawVars(); }
+      });
       const m = () => {
         const c = num(f.costo.value), pr = num(f.precio.value);
-        root.querySelector('#margen').textContent = pr ? `${(((pr - c) / pr) * 100).toFixed(1)}% · ganancia ${fmtCur(pr - c, 'USD')} por unidad` : '—';
+        root.querySelector('#margen').textContent = pr ? `${(((pr - c) / pr) * 100).toFixed(1)}% · ganancia ${fmtCur(pr - c, 'USD')} por pieza` : '—';
       };
       f.costo.addEventListener('input', m); f.precio.addEventListener('input', m); m();
-      root.querySelectorAll('[data-stock]').forEach(inp => inp.addEventListener('input', () => {
-        if (num(inp.value) !== 0) root.querySelector(`[data-talla="${CSS.escape(inp.dataset.stock)}"]`).checked = true;
-      }));
-      root.querySelector('#tallaExtra').addEventListener('keydown', e => {
-        if (e.key !== 'Enter') return;
-        e.preventDefault();
-        const t = e.target.value.trim();
-        if (!t || root.querySelector(`[data-talla="${CSS.escape(t)}"]`)) return;
-        const div = document.createElement('div');
-        div.innerHTML = `<label><input type="checkbox" data-talla="${esc(t)}" checked style="width:auto"> ${esc(t)}</label><input type="number" step="1" data-stock="${esc(t)}" value="0">`;
-        root.querySelector('.size-grid').appendChild(div);
-        e.target.value = '';
-      });
       root.querySelector('[data-close]').addEventListener('click', closeModal);
       f.addEventListener('submit', e => {
         e.preventDefault();
         const d = formData(f);
-        const variantes = [...root.querySelectorAll('[data-talla]')].filter(c => c.checked).map(c => ({
-          talla: c.dataset.talla, stock: parseInt(root.querySelector(`[data-stock="${CSS.escape(c.dataset.talla)}"]`).value, 10) || 0,
-        }));
-        if (!variantes.length) { toast('Marca al menos una talla'); return; }
-        const datos = { nombre: d.nombre.trim(), categoria: d.categoria, institucion: d.institucion.trim(), color: d.color.trim(), sku: d.sku.trim(), costo: num(d.costo), precio: num(d.precio), minimo: parseInt(d.minimo, 10) || 0 };
+        const variantes = vars.map(v => ({ color: v.color.trim(), talla: v.talla, stock: parseInt(v.stock, 10) || 0 })).filter(v => v.talla);
+        if (!variantes.length) { toast('Agrega al menos un color y talla'); return; }
+        const keys = variantes.map(vk);
+        if (new Set(keys).size !== keys.length) { toast('Hay un color y talla repetidos'); return; }
+        const datos = { nombre: d.nombre.trim(), categoria: d.categoria, tela: d.tela.trim(), sku: d.sku.trim(), costo: num(d.costo), precio: num(d.precio), minimo: parseInt(d.minimo, 10) || 0 };
         if (p) {
           for (const v of variantes) {
-            const antes = stockDe(p, v.talla);
-            if (v.stock !== antes) S.movInv.push({ id: uid(), fecha: today(), productoId: p.id, talla: v.talla, cant: v.stock - antes, tipo: 'ajuste', nota: 'Edición de producto' });
+            const antes = stockDe(p, vk(v));
+            if (v.stock !== antes) S.movInv.push({ id: uid(), fecha: today(), productoId: p.id, talla: vk(v), cant: v.stock - antes, tipo: 'ajuste', nota: 'Edición de producto' });
           }
+          delete p.institucion; delete p.color;
           Object.assign(p, datos, { variantes });
         } else {
           const np = Object.assign({ id: uid(), variantes }, datos);
           S.productos.push(np);
-          for (const v of variantes) if (v.stock) S.movInv.push({ id: uid(), fecha: today(), productoId: np.id, talla: v.talla, cant: v.stock, tipo: 'inicial', nota: 'Stock inicial' });
+          for (const v of variantes) if (v.stock) S.movInv.push({ id: uid(), fecha: today(), productoId: np.id, talla: vk(v), cant: v.stock, tipo: 'inicial', nota: 'Stock inicial' });
         }
         save(); closeModal(); render(); toast('Producto guardado');
       });
@@ -1379,15 +1434,15 @@
 
   actions.ajusteInv = () => {
     if (!S.productos.length) { toast('No hay productos'); return; }
-    const p0 = S.productos[0];
+    const p0 = [...S.productos].sort((a, b) => a.nombre.localeCompare(b.nombre))[0];
     openModal('Ajuste de inventario', `
       <form id="f">
-        <p class="muted small">Usa "Entrada" para prendas que salen de producción propia o devoluciones; "Salida" para mermas, regalos o daños.
+        <p class="muted small">Usa "Entrada" para devoluciones o piezas que aparecieron; "Salida" para mermas, regalos o daños; "Conteo físico" para corregir el número real.
         Las compras a proveedores regístralas en <a href="#gastos">Compras</a> para que también afecten tus cuentas por pagar.</p>
         <div class="form-grid">
           <div><label>Fecha</label><input type="date" name="fecha" value="${today()}"></div>
-          <div><label>Producto</label><select name="productoId">${options(S.productos, p0.id)}</select></div>
-          <div><label>Talla</label><select name="talla">${options(p0.variantes.map(v => v.talla), '')}</select></div>
+          <div><label>Producto</label><select name="productoId">${options([...S.productos].sort((a, b) => a.nombre.localeCompare(b.nombre)), p0.id)}</select></div>
+          <div><label>Color · talla</label><select name="talla">${options(p0.variantes.map(vk), '')}</select></div>
           <div><label>Tipo</label><select name="tipo"><option value="entrada">Entrada (+)</option><option value="salida">Salida (−)</option><option value="conteo">Conteo físico (=)</option></select></div>
           <div><label>Cantidad</label><input name="cant" type="number" step="1" min="0" required></div>
           <div class="full"><label>Motivo</label><input name="nota" placeholder="Ej. Producción taller, merma, devolución"></div>
@@ -1397,7 +1452,7 @@
       const f = root.querySelector('#f');
       f.productoId.addEventListener('change', () => {
         const p = byId(S.productos, f.productoId.value);
-        f.talla.innerHTML = options(p.variantes.map(v => v.talla), '');
+        f.talla.innerHTML = options(p.variantes.map(vk), '');
       });
       root.querySelector('[data-close]').addEventListener('click', closeModal);
       f.addEventListener('submit', e => {
@@ -1415,7 +1470,7 @@
 
   actions.verMovInv = () => {
     const list = [...S.movInv].sort((a, b) => b.fecha.localeCompare(a.fecha)).slice(0, 300);
-    openModal('Movimientos de inventario', table(['Fecha', 'Producto', 'Talla', ['Cant.', 'num'], 'Tipo', 'Nota'], list.map(m => {
+    openModal('Movimientos de inventario', table(['Fecha', 'Producto', 'Color · talla', ['Cant.', 'num'], 'Tipo', 'Nota'], list.map(m => {
       const p = byId(S.productos, m.productoId);
       return `<tr><td>${fmtDate(m.fecha)}</td><td>${esc(p ? p.nombre : '(eliminado)')}</td><td>${esc(m.talla)}</td>
         <td class="num" style="color:${m.cant < 0 ? 'var(--danger)' : 'var(--success)'}">${m.cant > 0 ? '+' : ''}${m.cant}</td><td>${esc(m.tipo)}</td><td>${esc(m.nota)}</td></tr>`;
@@ -1423,8 +1478,8 @@
   };
 
   actions.csvInventario = () => {
-    const rows = [['Producto', 'Categoria', 'Institucion', 'Color', 'SKU', 'Talla', 'Stock', 'Costo USD', 'Precio USD', 'Valor costo USD']];
-    for (const p of S.productos) for (const v of p.variantes) rows.push([p.nombre, p.categoria, p.institucion, p.color, p.sku, v.talla, v.stock, p.costo, p.precio, round2(v.stock * p.costo)]);
+    const rows = [['Producto', 'Categoria', 'Tela', 'Color', 'Talla', 'Piezas', 'Costo USD', 'Precio USD', 'Valor costo USD']];
+    for (const p of S.productos) for (const v of p.variantes) rows.push([p.nombre, p.categoria, p.tela || '', v.color || '', v.talla, v.stock, p.costo, p.precio, round2(v.stock * p.costo)]);
     downloadCSV('inventario.csv', rows);
   };
 
@@ -1783,8 +1838,8 @@
 
   function formContacto(kind, c) {
     const tipos = kind === 'clientes'
-      ? ['Colegio', 'Empresa', 'Clínica / Hospital', 'Restaurante', 'Gobierno', 'Persona natural', 'Revendedor']
-      : ['Telas', 'Insumos (hilos, botones, cierres)', 'Taller de costura', 'Bordado / Estampado', 'Mercancía terminada', 'Servicios', 'Otro'];
+      ? ['Persona natural', 'Médico(a)', 'Enfermero(a)', 'Estudiante', 'Odontólogo(a)', 'Clínica / Hospital', 'Revendedor', 'Otro']
+      : ['Mercancía terminada', 'Envíos / courier', 'Empaque', 'Bordado / personalización', 'Servicios', 'Otro'];
     openModal(c ? 'Editar' : (kind === 'clientes' ? 'Nuevo cliente' : 'Nuevo proveedor'), `
       <form id="f">
         <div class="form-grid">
@@ -1816,7 +1871,7 @@
     const r = resultados(desde, hasta);
     const pct = v => r.netas ? `${(v / r.netas * 100).toFixed(1)}%` : '—';
 
-    const porProd = {}, porTalla = {}, porCliente = {}, porInst = {};
+    const porProd = {}, porTalla = {}, porCliente = {}, porCat = {}, porColor = {};
     for (const v of r.ventas) {
       const factor = v.subtotal ? v.total / v.subtotal : 1; // reparte el descuento
       for (const it of v.items) {
@@ -1825,10 +1880,13 @@
         const k = it.nombre;
         porProd[k] = porProd[k] || { cant: 0, ingreso: 0, util: 0 };
         porProd[k].cant += it.cant; porProd[k].ingreso += ingreso; porProd[k].util += util;
-        porTalla[it.talla || '—'] = (porTalla[it.talla || '—'] || 0) + it.cant;
+        const kv = splitKey(it.talla);
+        const talla = kv.talla || '—';
+        porTalla[talla] = (porTalla[talla] || 0) + it.cant;
+        if (kv.color) porColor[kv.color] = (porColor[kv.color] || 0) + it.cant;
         const prod = byId(S.productos, it.productoId);
-        const inst = prod && prod.institucion ? prod.institucion : 'Sin institución';
-        porInst[inst] = (porInst[inst] || 0) + ingreso;
+        const cat = prod && prod.categoria ? prod.categoria : 'Sin categoría';
+        porCat[cat] = (porCat[cat] || 0) + ingreso;
       }
       const cn = nombreCliente(v.clienteId);
       porCliente[cn] = (porCliente[cn] || 0) + v.total;
@@ -1879,15 +1937,17 @@
           ${table(['Producto', ['Unid.', 'num'], ['Ingreso', 'num'], ['Utilidad', 'num'], ['Margen', 'num']], Object.entries(porProd).sort((a, b) => b[1].util - a[1].util).map(([k, x]) => `
             <tr><td>${esc(k)}</td><td class="num">${x.cant}</td><td class="num">${money(x.ingreso)}</td><td class="num">${money(x.util)}</td><td class="num">${x.ingreso ? (x.util / x.ingreso * 100).toFixed(0) + '%' : '—'}</td></tr>`), 'Sin ventas')}
         </div>
-        <div class="card"><h3>Ventas por institución</h3>
-          ${table(['Institución', ['Ventas', 'num']], Object.entries(porInst).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${money(v)}</td></tr>`), 'Sin ventas')}
+        <div class="card"><h3>Ventas por categoría</h3>
+          ${table(['Categoría', ['Ventas', 'num']], Object.entries(porCat).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${money(v)}</td></tr>`), 'Sin ventas')}
           <h3 style="margin-top:16px">Mejores clientes</h3>
           ${table(['Cliente', ['Ventas', 'num']], Object.entries(porCliente).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${money(v)}</td></tr>`), 'Sin ventas')}
         </div>
-        <div class="card"><h3>Unidades vendidas por talla</h3>
+        <div class="card"><h3>Piezas vendidas por talla</h3>
           ${Object.keys(porTalla).length ? Object.entries(porTalla).sort((a, b) => b[1] - a[1]).map(([k, v]) => `
             <div class="bar-row"><span>Talla ${esc(k)}</span><div class="bar-track"><div class="bar-fill" style="width:${(v / tallaMax * 100).toFixed(1)}%"></div></div><span class="num">${v} u.</span></div>`).join('') : '<p class="muted">Sin ventas.</p>'}
-          <p class="muted small">Úsalo para planificar la producción de la próxima temporada escolar.</p>
+          <h3 style="margin-top:16px">Colores más vendidos</h3>
+          ${table(['Color', ['Piezas', 'num']], Object.entries(porColor).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${v}</td></tr>`), 'Sin ventas')}
+          <p class="muted small">Úsalo para decidir qué tallas y colores pedir en el próximo pedido a Jaanuu.</p>
         </div>
         <div class="card"><h3>Ingresos vs egresos (6 meses)</h3>${chartMeses()}</div>
       </div>
@@ -1959,7 +2019,6 @@
             <label class="btn" style="margin:0;color:var(--text);font-size:14px">⬆ Restaurar respaldo<input type="file" id="importFile" accept="application/json" hidden></label>
           </div>
           <div class="toolbar">
-            <button class="btn" data-action="cargarDemo">Cargar datos de ejemplo</button>
             <button class="btn danger" data-action="borrarTodo">Borrar todos los datos</button>
           </div>
         </div>

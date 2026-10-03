@@ -754,7 +754,7 @@
     caja: 'Caja y bancos', clientes: 'Clientes', proveedores: 'Proveedores', reportes: 'Reportes',
     config: 'Configuración',
   };
-  const ui = { ventasMes: monthKey(today()), gastosMes: monthKey(today()), q: {}, cuentaSel: '', repDesde: monthRange(monthKey(today()))[0], repHasta: today() };
+  const ui = { ventasMes: '', gastosMes: '', panelPeriodo: 'todo', q: {}, cuentaSel: '', repDesde: today().slice(0, 4) + '-01-01', repHasta: today() };
 
   // Navegación: se guarda en memoria (el visor no siempre expone location.hash).
   function routeFromHash() { const h = (location.hash || '').slice(1); return routes[h] ? h : ''; }
@@ -820,10 +820,15 @@
   // ----------------------------- Panel ---------------------------------------
 
   routes.panel = function () {
-    const mes = ui.panelPeriodo === 'mes';
-    const [d1, d2] = mes ? monthRange(monthKey(today())) : [addDays(today(), -29), today()];
-    const per = mes ? 'del mes' : '(30 días)';
+    const periodo = ui.panelPeriodo || 'todo';
+    const primera = [...S.ventas, ...S.gastos].reduce((m, x) => (x.fecha && x.fecha < m ? x.fecha : m), today());
+    const [d1, d2] = periodo === 'mes' ? monthRange(monthKey(today()))
+      : periodo === '30' ? [addDays(today(), -29), today()]
+      : periodo === 'anio' ? [today().slice(0, 4) + '-01-01', today()]
+      : [primera, today()];
+    const per = { mes: 'del mes', '30': '(30 días)', anio: 'del año', todo: '(total)' }[periodo];
     const r = resultados(d1, d2);
+    const comprasPer = S.gastos.filter(g => g.tipo === 'compra' && enRango(g.fecha, d1, d2)).reduce((a, g) => a + g.total, 0);
     const cxc = S.ventas.map(v => ({ v, s: saldoVenta(v) })).filter(x => x.s > 0.009);
     const cxcTotal = cxc.reduce((a, x) => a + x.s, 0);
     const cxcVencido = cxc.filter(x => x.v.vence && x.v.vence < today()).reduce((a, x) => a + x.s, 0);
@@ -862,15 +867,14 @@
     return `${empezar}
       <div class="toolbar">
         <select id="panelPeriodo">
-          <option value="30" ${mes ? '' : 'selected'}>Últimos 30 días</option>
-          <option value="mes" ${mes ? 'selected' : ''}>Este mes</option>
+          ${[['todo', 'Desde el inicio'], ['anio', 'Este año'], ['mes', 'Este mes'], ['30', 'Últimos 30 días']].map(([v, l]) => `<option value="${v}" ${periodo === v ? 'selected' : ''}>${l}</option>`).join('')}
         </select>
         <span class="muted small">${fmtDate(d1)} – ${fmtDate(d2)}</span>
       </div>
       <div class="grid kpis">
         ${kpi(`Ventas ${per}`, money(r.netas), `${r.ventas.length} ventas · cobrado ${money(cobrosMes)}`)}
         ${kpi(`Utilidad neta ${per}`, money(r.utilNeta), `Margen ${(r.margen * 100).toFixed(1)}%`, r.utilNeta >= 0 ? 'good' : 'bad')}
-        ${kpi(`Gastos ${per}`, money(r.totalGastos), `Costo de ventas ${money(r.costo)}`)}
+        ${kpi(`Gastos ${per}`, money(r.totalGastos), `Compras de mercancía ${money(comprasPer)} · costo de lo vendido ${money(r.costo)}`)}
         ${kpi('Disponible en caja', money(caja), `${S.cuentas.length} cuentas`)}
         ${kpi('Por cobrar', money(cxcTotal), cxcVencido > 0 ? `<span style="color:var(--danger)">Vencido ${money(cxcVencido)}</span>` : 'Nada vencido')}
         ${kpi('Por pagar', money(cxpTotal), `${cxp.length} documentos`)}
@@ -1492,6 +1496,7 @@
       .filter(g => matches(q, g.descripcion, g.categoria, nombreProveedor(g.proveedorId), g.numero))
       .sort((a, b) => b.fecha.localeCompare(a.fecha));
     const total = list.reduce((a, g) => a + g.total, 0);
+    const totCompras = list.filter(g => g.tipo === 'compra').reduce((a, g) => a + g.total, 0);
     return `
       <div class="toolbar">
         <button class="btn primary" data-action="nuevoGasto">+ Gasto</button>
@@ -1500,7 +1505,7 @@
         <button class="btn sm" data-action="todosMeses" data-id="gastosMes">Todos</button>
         <input type="search" placeholder="Buscar…" data-search="gastos" value="${esc(q)}">
         <span class="spacer"></span>
-        <span class="muted">Total: <b>${money(total)}</b></span>
+        <span class="muted">Compras de mercancía: <b>${money(totCompras)}</b> · Gastos: <b>${money(total - totCompras)}</b> · Total: <b>${money(total)}</b></span>
         <button class="btn sm" data-action="csvGastos">⬇ CSV</button>
       </div>
       <div class="card" style="padding:0">

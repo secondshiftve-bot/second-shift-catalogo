@@ -171,11 +171,13 @@
     },
 
     /** Aplica un documento que cambió en el servidor (body null = borrado). */
-    applyRemote(path, body) {
+    applyRemote(path, body, initial) {
       const prev = this.synced.get(path);
       const local = this.localBody(path);
       const localCanon = local === undefined ? undefined : canon(local);
-      const dirty = localCanon !== prev; // hay cambios locales aún no enviados
+      // Hay cambios locales aún no enviados. En la carga inicial no puede haberlos
+      // (no se guarda nada hasta terminar de cargar): manda el servidor.
+      const dirty = !initial && localCanon !== prev;
       if (body) this.synced.set(path, canon(body)); else this.synced.delete(path);
       if (dirty) return false;
       const [col, id] = path.split('/');
@@ -198,9 +200,10 @@
       for (const col of cols) {
         this.db.collection(col).onSnapshot(snap => {
           let changed = false;
+          const initial = !this.loaded.has(col);
           for (const ch of snap.docChanges()) {
             const path = `${col}/${ch.doc.id}`;
-            changed = this.applyRemote(path, ch.type === 'removed' ? null : ch.doc.data()) || changed;
+            changed = this.applyRemote(path, ch.type === 'removed' ? null : ch.doc.data(), initial) || changed;
           }
           const first = !this.loaded.has(col);
           this.loaded.add(col);

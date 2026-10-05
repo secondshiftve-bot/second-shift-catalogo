@@ -290,3 +290,14 @@ td.actions { white-space: nowrap; text-align: right; }
 /* Inventario por color */
 .var-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 2px 0; }
 .var-color { font-size: 12px; font-weight: 600; min-width: 110px; }
+
+/* Resumen del panel */
+.resumen .res-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 24px; }
+.res-title { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 4px; }
+.res-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+.res-row small { display: block; color: var(--muted); font-size: 11px; }
+.res-row b { font-weight: 600; white-space: nowrap; }
+.res-row.total { border-bottom: none; border-top: 2px solid var(--text); margin-top: 2px; font-size: 16px; }
+.res-row.total b { font-weight: 700; }
+.res-row.good b { color: var(--success); }
+.res-row.bad b { color: var(--danger); }

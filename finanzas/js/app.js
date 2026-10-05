@@ -45,12 +45,7 @@
 
   // Ids fijos: si dos personas abren la app vacía a la vez, crean las mismas cuentas.
   function defaultCuentas() {
-    return [
-      { id: 'cta-efectivo-usd', nombre: 'Efectivo $', moneda: 'USD', saldoInicial: 0 },
-      { id: 'cta-efectivo-bs', nombre: 'Efectivo Bs', moneda: 'VES', saldoInicial: 0 },
-      { id: 'cta-banco', nombre: 'Banco / Pago Móvil', moneda: 'VES', saldoInicial: 0 },
-      { id: 'cta-zelle', nombre: 'Zelle', moneda: 'USD', saldoInicial: 0 },
-    ];
+    return [{ id: 'cta-caja', nombre: 'Caja de la empresa', moneda: 'USD', saldoInicial: 0 }];
   }
 
   function defaultState() {
@@ -751,7 +746,7 @@
   const titles = {
     panel: 'Panel', ventas: 'Ventas', pedidos: 'Pedidos y encargos', inventario: 'Inventario',
     gastos: 'Compras y gastos', cobrar: 'Cuentas por cobrar', pagar: 'Cuentas por pagar',
-    caja: 'Caja y bancos', clientes: 'Clientes', proveedores: 'Proveedores', reportes: 'Reportes',
+    caja: 'Caja', clientes: 'Clientes', proveedores: 'Proveedores', reportes: 'Reportes',
     config: 'Configuración',
   };
   const ui = { ventasMes: '', gastosMes: '', panelPeriodo: 'todo', q: {}, cuentaSel: '', repDesde: today().slice(0, 4) + '-01-01', repHasta: today() };
@@ -864,7 +859,44 @@
         <button class="btn primary" data-action="cargarDemo">Cargar datos de ejemplo</button>
       </div>` : '';
 
+    // Resumen desde el inicio, en palabras.
+    const aportes = S.movimientos.filter(m => m.tipo === 'ingreso').reduce((a, m) => a + toUSD(m.monto, (byId(S.cuentas, m.cuentaId) || {}).moneda), 0);
+    const retiros = S.movimientos.filter(m => m.tipo === 'egreso').reduce((a, m) => a + toUSD(m.monto, (byId(S.cuentas, m.cuentaId) || {}).moneda), 0);
+    const cobradoTotal = S.pagos.filter(p => p.tipo === 'cobro').reduce((a, p) => a + p.montoUSD, 0);
+    const pagadoCompras = S.pagos.filter(p => p.tipo === 'pago' && (byId(S.gastos, p.ref.id) || {}).tipo === 'compra').reduce((a, p) => a + p.montoUSD, 0);
+    const pagadoGastos = S.pagos.filter(p => p.tipo === 'pago' && (byId(S.gastos, p.ref.id) || {}).tipo !== 'compra').reduce((a, p) => a + p.montoUSD, 0);
+    const piezas = S.productos.reduce((a, p) => a + Math.max(0, stockTotal(p)), 0);
+    const total = resultados('', today());
+    const fila = (label, valor, cls = '', nota = '') => `<div class="res-row ${cls}"><span>${label}${nota ? `<small>${nota}</small>` : ''}</span><b>${valor}</b></div>`;
+
     return `${empezar}
+      <div class="card resumen">
+        <h3>¿Cómo va el negocio?</h3>
+        <div class="res-cols">
+          <div>
+            <div class="res-title">Entró dinero</div>
+            ${aportes ? fila('Aportes de los socios', money(aportes)) : ''}
+            ${fila('Cobrado de ventas', money(cobradoTotal))}
+            <div class="res-title" style="margin-top:12px">Salió dinero</div>
+            ${fila('Mercancía (Jaanuu, envío, empaque)', '−' + money(pagadoCompras))}
+            ${fila('Otros gastos', '−' + money(pagadoGastos), '', 'logo, envíos, etc.')}
+            ${retiros ? fila('Retiros', '−' + money(retiros)) : ''}
+            ${fila('Dinero en caja hoy', money(caja), 'total')}
+          </div>
+          <div>
+            <div class="res-title">Lo que tiene el negocio hoy</div>
+            ${fila('Dinero en caja', money(caja))}
+            ${fila('Mercancía sin vender', money(invValor), '', `${piezas} piezas, a lo que costaron`)}
+            ${cxcTotal > 0.009 ? fila('Te deben', money(cxcTotal), '', `<a href="#cobrar">ver quién</a>`) : ''}
+            ${cxpTotal > 0.009 ? fila('Debes', '−' + money(cxpTotal), '', `<a href="#pagar">ver</a>`) : ''}
+            ${fila('Total', money(caja + invValor + cxcTotal - cxpTotal), 'total')}
+            <div class="res-title" style="margin-top:12px">Ganancia de lo vendido</div>
+            ${fila('Ganancia hasta hoy', money(total.utilNeta), total.utilNeta >= 0 ? 'good' : 'bad', 'ventas − costo de las piezas vendidas − gastos')}
+          </div>
+        </div>
+        <p class="muted small" style="margin:12px 0 0">La ganancia no es igual al dinero en caja: parte de lo que se ha pagado está en la mercancía que aún no se vende.</p>
+      </div>
+
       <div class="toolbar">
         <select id="panelPeriodo">
           ${[['todo', 'Desde el inicio'], ['anio', 'Este año'], ['mes', 'Este mes'], ['30', 'Últimos 30 días']].map(([v, l]) => `<option value="${v}" ${periodo === v ? 'selected' : ''}>${l}</option>`).join('')}
@@ -872,35 +904,28 @@
         <span class="muted small">${fmtDate(d1)} – ${fmtDate(d2)}</span>
       </div>
       <div class="grid kpis">
-        ${kpi(`Ventas ${per}`, money(r.netas), `${r.ventas.length} ventas · cobrado ${money(cobrosMes)}`)}
-        ${kpi(`Utilidad neta ${per}`, money(r.utilNeta), `Margen ${(r.margen * 100).toFixed(1)}%`, r.utilNeta >= 0 ? 'good' : 'bad')}
-        ${kpi(`Gastos ${per}`, money(r.totalGastos), `Compras de mercancía ${money(comprasPer)} · costo de lo vendido ${money(r.costo)}`)}
-        ${kpi('Disponible en caja', money(caja), `${S.cuentas.length} cuentas`)}
-        ${kpi('Por cobrar', money(cxcTotal), cxcVencido > 0 ? `<span style="color:var(--danger)">Vencido ${money(cxcVencido)}</span>` : 'Nada vencido')}
-        ${kpi('Por pagar', money(cxpTotal), `${cxp.length} documentos`)}
-        ${kpi('Inventario (al costo)', money(invValor), `Valor de venta ${money(invVenta)}`)}
+        ${kpi(`Vendido ${per}`, money(r.netas), `${r.ventas.reduce((a, v) => a + v.items.reduce((b, i) => b + i.cant, 0), 0)} piezas · cobrado ${money(cobrosMes)}`)}
+        ${kpi(`Ganancia ${per}`, money(r.utilNeta), `De cada $100 vendidos quedan $${Math.round(r.margen * 100)}`, r.utilNeta >= 0 ? 'good' : 'bad')}
       </div>
       <div class="grid two">
-        <div class="card"><h3>Ingresos vs egresos (6 meses)</h3>${chartMeses()}</div>
-        <div class="card"><h3>Más vendidos ${per}</h3>
+        <div class="card"><h3>Lo más vendido ${per}</h3>
           ${topList.length ? topList.map(([n, x]) => `
             <div class="bar-row"><span title="${esc(n)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(n)}</span>
             <div class="bar-track"><div class="bar-fill" style="width:${(x.total / topMax * 100).toFixed(1)}%"></div></div>
-            <span class="num">${money(x.total)}</span></div>`).join('') : '<p class="muted">Aún no hay ventas en el período.</p>'}
+            <span class="num">${x.cant} pzs</span></div>`).join('') : '<p class="muted">Aún no hay ventas en el período.</p>'}
         </div>
-        <div class="card"><h3>Pedidos por entregar</h3>
+        ${pedidosAbiertos.length ? `<div class="card"><h3>Pedidos por entregar</h3>
           ${table(['#', 'Cliente', 'Entrega', 'Estado', ['Saldo', 'num']], pedidosAbiertos.map(p => `
             <tr><td>${esc(p.numero)}</td><td>${esc(nombreCliente(p.clienteId))}</td>
             <td>${p.entrega ? fmtDate(p.entrega) + (p.entrega < today() ? ' <span class="badge bad">Atrasado</span>' : '') : '—'}</td>
-            <td>${estadoBadge(p.estado)}</td><td class="num">${money(saldoPedido(p))}</td></tr>`), 'No hay pedidos pendientes 🎉')}
-        </div>
-        <div class="card"><h3>Stock bajo</h3>
-          ${table(['Producto', 'Color · talla en mínimo'], bajos.map(p => `
-            <tr><td>${esc(p.nombre)}</td><td>${p.variantes.filter(v => v.stock <= p.minimo).map(v => `<span class="badge ${v.stock <= 0 ? 'bad' : 'warn'}">${esc(vk(v))}: ${v.stock}</span>`).join(' ')}</td></tr>`), 'Ningún producto tiene aviso de mínimo activado')}
-        </div>
+            <td>${estadoBadge(p.estado)}</td><td class="num">${money(saldoPedido(p))}</td></tr>`))}
+        </div>` : ''}
+        ${bajos.length ? `<div class="card"><h3>Se está acabando</h3>
+          ${table(['Producto', 'Color · talla'], bajos.map(p => `
+            <tr><td>${esc(p.nombre)}</td><td>${p.variantes.filter(v => v.stock <= p.minimo).map(v => `<span class="badge ${v.stock <= 0 ? 'bad' : 'warn'}">${esc(vk(v))}: ${v.stock}</span>`).join(' ')}</td></tr>`))}
+        </div>` : ''}
       </div>`;
   };
-
   routes.panel.after = () => {
     $('#panelPeriodo').addEventListener('change', e => { ui.panelPeriodo = e.target.value; render(); });
   };
@@ -2173,8 +2198,8 @@
   actions.cargarDemo = async () => {
     if ((S.ventas.length || S.productos.length) && !(await ask('Esto reemplazará los datos actuales por datos de ejemplo.', { ok: 'Reemplazar', danger: true, typed: 'BORRAR' }))) return;
     S = defaultState();
-    const [efUsd, efBs, banco, zelle] = S.cuentas;
-    efUsd.saldoInicial = 800; banco.saldoInicial = 15000;
+    const efUsd = S.cuentas[0], efBs = efUsd, banco = efUsd, zelle = efUsd;
+    efUsd.saldoInicial = 800;
 
     const cl = (nombre, tipo, telefono) => { const c = { id: uid(), nombre, tipo, doc: '', telefono, email: '', direccion: '', notas: '' }; S.clientes.push(c); return c; };
     const colegio = cl('U.E. Colegio San José', 'Colegio', '0414-5550101');
